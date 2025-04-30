@@ -1,0 +1,413 @@
+use std::{error::Error, fmt::Display};
+
+use base64::prelude::*;
+use lettre::{
+    message::{header::ContentType as LettreContentType, Mailbox as LettreMailbox},
+    Message as LettreMessage, SmtpTransport, Transport,
+};
+use serde::{Deserialize, Serialize};
+use sodiumoxide::crypto::box_::{self, Nonce, PublicKey, SecretKey};
+
+use crate::deserialization::{
+    as_base64, as_base64_option, string_is_ecc_public_key, string_is_ecc_public_key_option,
+    string_is_nonce, string_is_nonce_option,
+};
+
+// Errors that can occur during processing of a SURB
+#[derive(Debug)]
+pub enum SingleUseReplyBlockProcessError {
+    Decryption,
+    Base64Decode { source: base64::DecodeError },
+    YamlDeserialization { source: serde_yaml::Error },
+    Utf8Deserialization { source: std::str::Utf8Error },
+    Unraveling,
+    Smtp,
+}
+
+impl Error for SingleUseReplyBlockProcessError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            SingleUseReplyBlockProcessError::Base64Decode { ref source } => Some(source),
+            SingleUseReplyBlockProcessError::YamlDeserialization { ref source } => Some(source),
+            SingleUseReplyBlockProcessError::Utf8Deserialization { ref source } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl Display for SingleUseReplyBlockProcessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SingleUseReplyBlockProcessError::Decryption => {
+                f.write_str("Failed to decrypt ciphertext")
+            }
+            SingleUseReplyBlockProcessError::Base64Decode { ref source } => {
+                f.write_str(format!("{}", source).as_str())
+            }
+            SingleUseReplyBlockProcessError::YamlDeserialization { ref source } => {
+                f.write_str(format!("{}", source).as_str())
+            }
+            SingleUseReplyBlockProcessError::Utf8Deserialization { ref source } => {
+                f.write_str(format!("{}", source).as_str())
+            }
+            SingleUseReplyBlockProcessError::Unraveling => {
+                f.write_str("Did not have a sufficient number of secret keys to fully unravel SURB plaintext, but there are no further recipients to forward SURB to")
+            }
+            SingleUseReplyBlockProcessError::Smtp => f.write_str("Failed to forward SURB via SMTP"),
+        }
+    }
+}
+
+impl From<base64::DecodeError> for SingleUseReplyBlockProcessError {
+    fn from(value: base64::DecodeError) -> Self {
+        SingleUseReplyBlockProcessError::Base64Decode { source: value }
+    }
+}
+
+impl From<serde_yaml::Error> for SingleUseReplyBlockProcessError {
+    fn from(value: serde_yaml::Error) -> Self {
+        SingleUseReplyBlockProcessError::YamlDeserialization { source: value }
+    }
+}
+
+impl From<std::str::Utf8Error> for SingleUseReplyBlockProcessError {
+    fn from(value: std::str::Utf8Error) -> Self {
+        SingleUseReplyBlockProcessError::Utf8Deserialization { source: value }
+    }
+}
+
+// Errors that can occur during creation of a SURB
+#[derive(Debug)]
+pub enum SingleUseReplyBlockCreationError {
+    Serialization { source: serde_yaml::Error },
+}
+
+impl Error for SingleUseReplyBlockCreationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match *self {
+            SingleUseReplyBlockCreationError::Serialization { ref source } => Some(source),
+        }
+    }
+}
+
+impl Display for SingleUseReplyBlockCreationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SingleUseReplyBlockCreationError::Serialization { ref source } => {
+                f.write_str(format!("{}", source).as_str())
+            }
+        }
+    }
+}
+
+impl From<serde_yaml::Error> for SingleUseReplyBlockCreationError {
+    fn from(value: serde_yaml::Error) -> Self {
+        SingleUseReplyBlockCreationError::Serialization { source: value }
+    }
+}
+
+// Link in a SURB chain
+pub struct Link {
+    pub address: String,
+    pub public_key: PublicKey,
+}
+
+// When a link in the SURB chain receives a layer of the SURB, the
+// layer decrypts to this. It contains the cryptographic material to
+// re-encrypt the payload being shepherded back to the original
+// creator of the SURB, and which address to forward it to.
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SingleUseReplyBlockReverseLayer {
+    #[serde(
+        serialize_with = "as_base64",
+        deserialize_with = "string_is_ecc_public_key"
+    )]
+    encryption_public_key: PublicKey,
+    #[serde(serialize_with = "as_base64", deserialize_with = "string_is_nonce")]
+    encryption_nonce: Nonce,
+    address: String,
+    reverse_layer: SingleUseReplyBlock,
+}
+
+// When a SURB is sent back to the original creator of the SURB, the
+// sender can include some payload for the creator. This allows the
+// payload to be encrypted with an ephemeral key derived from an
+// ephemeral key generated by the creator, and an ephemeral key
+// generated by the sender. At each link along the way, the payload is
+// re-encrypted with a new ephemeral key, to ensure that the bytes are
+// re-randomized at each link.
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct SingleUseReplyBlockForwardLayer {
+    #[serde(
+        serialize_with = "as_base64",
+        deserialize_with = "string_is_ecc_public_key"
+    )]
+    decryption_public_key: PublicKey,
+    #[serde(serialize_with = "as_base64", deserialize_with = "string_is_nonce")]
+    decryption_nonce: Nonce,
+    payload: String,
+}
+
+// The SURB contains the cryptographic material necessary to decrypt
+// the payload which will be a SingleUseReplyBlockReverseLayer, along
+// with an optional field that would contain the optional payload
+// being sent back to the creator of the SURB from the recipient of
+// the SURB.
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SingleUseReplyBlock {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "as_base64_option",
+        deserialize_with = "string_is_ecc_public_key_option"
+    )]
+    decryption_public_key: Option<PublicKey>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "as_base64_option",
+        deserialize_with = "string_is_nonce_option"
+    )]
+    decryption_nonce: Option<Nonce>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reverse_layer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forward_layer: Option<SingleUseReplyBlockForwardLayer>,
+}
+
+impl SingleUseReplyBlock {
+    // Creates a new SURB that leads back to the provided recipient,
+    // through the provided chain, optionally encrypting the final
+    // layer using the provided secret key
+    pub fn new(
+        recipient: &Link,
+        chain: &[Link],
+        sender_pk: Option<&PublicKey>,
+    ) -> Result<(Self, Vec<SecretKey>), SingleUseReplyBlockCreationError> {
+        // Store the ephemeral keys that will be used to decrypt the
+        // returned SURB payload
+        let mut secret_keys: Vec<SecretKey> = vec![];
+
+        // Create final layer that leads back to recipient
+        let (encryption_public_key, encryption_secret_key) = box_::gen_keypair();
+        secret_keys.push(encryption_secret_key);
+        let encryption_nonce = box_::gen_nonce();
+        let mut surb_reverse_layer = SingleUseReplyBlockReverseLayer {
+            encryption_public_key,
+            encryption_nonce,
+            address: recipient.address.clone(),
+            reverse_layer: SingleUseReplyBlock {
+                decryption_public_key: None,
+                decryption_nonce: None,
+                reverse_layer: None,
+                forward_layer: None,
+            },
+        };
+
+        // Create each intermediate layer
+        for link in chain.iter() {
+            // First encrypt the reverse layer
+            let (decryption_public_key, decryption_secret_key) = box_::gen_keypair();
+            let decryption_nonce = box_::gen_nonce();
+            let inner_string = serde_yaml::to_string(&surb_reverse_layer)?;
+            let inner_encrypted = box_::seal(
+                inner_string.as_bytes(),
+                &decryption_nonce,
+                &link.public_key,
+                &decryption_secret_key,
+            );
+            let payload = Some(BASE64_STANDARD.encode(&inner_encrypted));
+
+            // Create a SURB with the reverse layer as payload
+            let surb = SingleUseReplyBlock {
+                decryption_public_key: Some(decryption_public_key),
+                decryption_nonce: Some(decryption_nonce),
+                reverse_layer: payload,
+                forward_layer: None,
+            };
+
+            // Now wrap the SURB in the next reverse layer
+            let address = link.address.clone();
+            let (encryption_public_key, encryption_secret_key) = box_::gen_keypair();
+            secret_keys.push(encryption_secret_key);
+            let encryption_nonce = box_::gen_nonce();
+            surb_reverse_layer = SingleUseReplyBlockReverseLayer {
+                encryption_public_key,
+                encryption_nonce,
+                address,
+                reverse_layer: surb,
+            };
+        }
+
+        // Create outer layer that the client that will send the SURB
+        // back will receive. This will be either unencrypted if we
+        // don't know the client's public-key, and encrypted otherwise
+        let surb = match sender_pk {
+            Some(sender_public_key) => {
+                let (decryption_public_key, decryption_secret_key) = box_::gen_keypair();
+                let decryption_nonce = box_::gen_nonce();
+                let inner_string = serde_yaml::to_string(&surb_reverse_layer)?;
+                let inner_encrypted = box_::seal(
+                    inner_string.as_bytes(),
+                    &decryption_nonce,
+                    sender_public_key,
+                    &decryption_secret_key,
+                );
+                let payload = Some(BASE64_STANDARD.encode(&inner_encrypted));
+                SingleUseReplyBlock {
+                    decryption_public_key: Some(decryption_public_key),
+                    decryption_nonce: Some(decryption_nonce),
+                    reverse_layer: payload,
+                    forward_layer: None,
+                }
+            }
+            None => {
+                let inner_string = serde_yaml::to_string(&surb_reverse_layer)?;
+                let payload = Some(BASE64_STANDARD.encode(&inner_string));
+                SingleUseReplyBlock {
+                    decryption_public_key: None,
+                    decryption_nonce: None,
+                    reverse_layer: payload,
+                    forward_layer: None,
+                }
+            }
+        };
+        Ok((surb, secret_keys))
+    }
+
+    // Takes a SURB and either returns the final payload or forwards
+    // it along to the next recipient
+    pub fn process(
+        &self,
+        from: String,
+        msg: Option<&str>,
+        sk: &SecretKey,
+        secret_keys: &[SecretKey],
+        mailer: &SmtpTransport,
+    ) -> Result<Option<String>, SingleUseReplyBlockProcessError> {
+        // Extract the reverse layer if it exists, decrypting it if
+        // necessary
+        let reverse_layer = match (
+            &self.decryption_public_key,
+            &self.decryption_nonce,
+            &self.reverse_layer,
+            &self.forward_layer,
+        ) {
+            // Contains some encrypted payload
+            (Some(key), Some(nonce), Some(reverse_layer_b64), _) => {
+                let reverse_layer_decoded = BASE64_STANDARD.decode(reverse_layer_b64)?;
+                let reverse_layer_bytes = box_::open(&reverse_layer_decoded, nonce, key, sk)
+                    .map_err(|_| SingleUseReplyBlockProcessError::Decryption)?;
+                serde_yaml::from_slice::<SingleUseReplyBlockReverseLayer>(&reverse_layer_bytes)?
+            }
+            // Contains some plaintext payload
+            (_, _, Some(reverse_layer_b64), _) => {
+                let reverse_layer_decoded = BASE64_STANDARD.decode(reverse_layer_b64)?;
+                serde_yaml::from_slice::<SingleUseReplyBlockReverseLayer>(&reverse_layer_decoded)?
+            }
+            // End of the SURB, unravel the forward layer payload
+            (_, _, None, Some(forward_layer)) => {
+                let mut layer = forward_layer.clone();
+                for secret_key in secret_keys.iter() {
+                    let payload_bytes_decoded = BASE64_STANDARD.decode(layer.payload.as_bytes())?;
+                    let layer_bytes = box_::open(
+                        &payload_bytes_decoded,
+                        &layer.decryption_nonce,
+                        &layer.decryption_public_key,
+                        secret_key,
+                    )
+                    .map_err(|_| SingleUseReplyBlockProcessError::Decryption)?;
+                    match serde_yaml::from_slice::<SingleUseReplyBlockForwardLayer>(&layer_bytes) {
+                        Ok(new_layer) => {
+                            layer = new_layer;
+                        }
+                        Err(_) => {
+                            return Ok(Some(std::str::from_utf8(&layer_bytes)?.to_string()));
+                        }
+                    }
+                }
+                return Err(SingleUseReplyBlockProcessError::Unraveling);
+            }
+            // Contains nothing at all
+            (_, _, _, _) => return Ok(None),
+        };
+
+        // Derive the new forward layer by either encrypting the given
+        // message or re-encrypting the existing forward layer
+        let forward_layer = match (&self.forward_layer, msg) {
+            // Contains an existing forward layer
+            (Some(forward_layer), _) => {
+                let (public_key, secret_key) = box_::gen_keypair();
+                let forward_layer_string = serde_yaml::to_string(&forward_layer)?;
+                let forward_layer_encrypted = box_::seal(
+                    forward_layer_string.as_bytes(),
+                    &reverse_layer.encryption_nonce,
+                    &reverse_layer.encryption_public_key,
+                    &secret_key,
+                );
+                let forward_layer_encrypted_b64 = BASE64_STANDARD.encode(&forward_layer_encrypted);
+                SingleUseReplyBlockForwardLayer {
+                    decryption_public_key: public_key,
+                    decryption_nonce: reverse_layer.encryption_nonce,
+                    payload: forward_layer_encrypted_b64,
+                }
+            }
+            // Contains no existing forward layer, sending back a
+            // custom payload
+            (None, Some(msg)) => {
+                let (public_key, secret_key) = box_::gen_keypair();
+                let msg_encrypted = box_::seal(
+                    msg.as_bytes(),
+                    &reverse_layer.encryption_nonce,
+                    &reverse_layer.encryption_public_key,
+                    &secret_key,
+                );
+                let msg_encrypted_b64 = BASE64_STANDARD.encode(&msg_encrypted);
+                SingleUseReplyBlockForwardLayer {
+                    decryption_public_key: public_key,
+                    decryption_nonce: reverse_layer.encryption_nonce,
+                    payload: msg_encrypted_b64,
+                }
+            }
+            // Contains no existing forward layer and was not given a
+            // custom payload, send back a generic message
+            (None, None) => {
+                let (public_key, secret_key) = box_::gen_keypair();
+                let msg_encrypted = box_::seal(
+                    "0xDEADBEEF".as_bytes(),
+                    &reverse_layer.encryption_nonce,
+                    &reverse_layer.encryption_public_key,
+                    &secret_key,
+                );
+                let msg_encrypted_b64 = BASE64_STANDARD.encode(&msg_encrypted);
+                SingleUseReplyBlockForwardLayer {
+                    decryption_public_key: public_key,
+                    decryption_nonce: reverse_layer.encryption_nonce,
+                    payload: msg_encrypted_b64,
+                }
+            }
+        };
+
+        // Construct payload with new forward layer
+        let mut payload = reverse_layer.reverse_layer;
+        payload.forward_layer = Some(forward_layer);
+        let payload_string = serde_yaml::to_string(&payload)?;
+        let payload_string_b64 = BASE64_STANDARD.encode(payload_string);
+
+        // Forward payload
+        let from: LettreMailbox = from.parse().unwrap();
+        let to: LettreMailbox = reverse_layer.address.parse().unwrap();
+        let email = LettreMessage::builder()
+            .from(from)
+            .to(to)
+            .subject("shallot")
+            .header(LettreContentType::TEXT_PLAIN)
+            .body(payload_string_b64)
+            .unwrap();
+        mailer
+            .send(&email)
+            .map_err(|_| SingleUseReplyBlockProcessError::Smtp)?;
+
+        Ok(None)
+    }
+}
