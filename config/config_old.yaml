@@ -19,17 +19,14 @@ mailboxes:
 identity:
   address: "alexj.pauwels@gmail.com"
   name: "Alexandre Pauwels"
-  secretkey: {}
+  secretkey: ""
 addressbook:
 - address: "johncamacuk@gmail.com"
   name: "John Camacuk Gmail"
-  publickey:
-    nacl: "xDaZE2I9pPfagsxv4T4XYKFFEBZll3+5jIVzFX/0STo="
+  publickey: "xDaZE2I9pPfagsxv4T4XYKFFEBZll3+5jIVzFX/0STo="
 - address: "johncamacuk@yahoo.com"
   name: "John Camacuk Yahoo"
-  publickey:
-    nacl: "W+7h6HeuHBYuybIWGMhYkpki2eXW3Oao9wORYcc5yR8="
+  publickey: "W+7h6HeuHBYuybIWGMhYkpki2eXW3Oao9wORYcc5yR8="
 - address: "heinzlefjuliette@yahoo.com"
   name: "Juliette Heinzlef"
-  publickey:
-    nacl: "W+7h6HeuHBYuybIWGMhYkpki2eXW3Oao9wORYcc5yR8="
+  publickey: "W+7h6HeuHBYuybIWGMhYkpki2eXW3Oao9wORYcc5yR8="

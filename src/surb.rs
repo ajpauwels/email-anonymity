@@ -107,6 +107,7 @@ impl From<serde_yaml::Error> for SingleUseReplyBlockCreationError {
 }
 
 // Link in a SURB chain
+#[derive(Clone)]
 pub struct Link {
     pub address: String,
     pub public_key: PublicKey,
@@ -180,7 +181,7 @@ impl SingleUseReplyBlock {
     // through the provided chain, optionally encrypting the final
     // layer using the provided secret key
     pub fn new(
-        recipient: &Link,
+        recipient: String,
         chain: &[Link],
         sender_pk: Option<&PublicKey>,
     ) -> Result<(Self, Vec<SecretKey>), SingleUseReplyBlockCreationError> {
@@ -195,7 +196,7 @@ impl SingleUseReplyBlock {
         let mut surb_reverse_layer = SingleUseReplyBlockReverseLayer {
             encryption_public_key,
             encryption_nonce,
-            address: recipient.address.clone(),
+            address: recipient,
             reverse_layer: SingleUseReplyBlock {
                 decryption_public_key: None,
                 decryption_nonce: None,
