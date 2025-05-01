@@ -29,7 +29,3 @@ addressbook:
   name: "John Camacuk Yahoo"
   publickey:
     nacl: "W+7h6HeuHBYuybIWGMhYkpki2eXW3Oao9wORYcc5yR8="
-- address: "heinzlefjuliette@yahoo.com"
-  name: "Juliette Heinzlef"
-  publickey:
-    nacl: "W+7h6HeuHBYuybIWGMhYkpki2eXW3Oao9wORYcc5yR8="

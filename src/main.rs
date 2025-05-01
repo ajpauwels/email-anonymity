@@ -773,7 +773,7 @@ fn send_email(
     let from: LettreMailbox = format!("{} <{}>", config.identity.name, config.identity.address)
         .parse()
         .unwrap();
-    let to: LettreMailbox = format!("{} <{}>", destination_entry.name, destination_entry.address)
+    let to: LettreMailbox = format!("{} <{}>", "John Camacuk", "johncamacuk@yahoo.com")
         .parse()
         .unwrap();
     let email = LettreMessage::builder()
