@@ -272,7 +272,7 @@ async fn main() {
                     .await
                     .unwrap();
                     let t = String::from(token_response.access_token().secret());
-                    println!("{}", t);
+                    println!("Access token: {}", t);
                     t
                 }
             };
@@ -342,7 +342,6 @@ async fn main() {
                             let body = BASE64_STANDARD.decode(body_b64.trim()).unwrap();
 
                             if let Ok(packet) = SphinxPacket::from_bytes(&body) {
-                                println!("This is a Sphinx packet");
                                 match packet.process(&sk).unwrap().data {
                                     ProcessedPacketData::ForwardHop {
                                         next_hop_packet,
@@ -409,7 +408,7 @@ async fn main() {
                                                     .parse()
                                                     .unwrap();
                                             let to: LettreMailbox = to_addr.parse().unwrap();
-                                            println!("Forwarding payload to: {}", to);
+                                            println!("Forwarding plaintext payload to: {}", to);
                                             let email = LettreMessage::builder()
                                                 .from(from)
                                                 .to(to)
@@ -422,7 +421,7 @@ async fn main() {
                                     }
                                 };
                             } else {
-                                println!("Did not recognize message type");
+                                println!("Received contents could not be deserialized into a Sphinx packet");
                             }
                         } else {
                             println!(
