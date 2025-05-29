@@ -227,8 +227,6 @@ async fn main() {
         }
     };
 
-    println!("{}", serde_yaml::to_string(&config).unwrap());
-
     // Generate the address book hashmap
     let address_book = build_address_book(config.address_book.as_ref());
 
