@@ -13,7 +13,7 @@ Cargo.lock
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
-# Don't include env files that may contains secrets
+# Don't include env files that may contain secrets
 *.env
 
 # Exclude the entire config directory, except for the base template
