@@ -27,10 +27,10 @@ addressbook:
 - address: "johncamacuk@yahoo.com"
   name: "John Camacuk Yahoo"
   publickey:
-    # nacl: "W+7h6HeuHBYuybIWGMhYkpki2eXW3Oao9wORYcc5yR8="
+    # nacl: "epAb3uco5DyZv/ZTVnwfPsG66+uIuamsssHOILQCJgE="
     dalek: "o42ZHseYE1W2ydS9Qk65z1Tk2K/N8nnu4C++TFWjJn4="
 - address: "johncamacuk@gmail.com"
   name: "John Camacuk Gmail"
   publickey:
-    # nacl: "xDaZE2I9pPfagsxv4T4XYKFFEBZll3+5jIVzFX/0STo="
+    # nacl: "o4mURQM/IxWVnpWyw9toVR1QItGdLeW7QHu8x9+DPn4="
     dalek: "dYbvsW7JV9g29AYqqabdJsgR1qSdlG8mZQYlYWXjLV4="
