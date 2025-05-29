@@ -195,7 +195,7 @@ async fn main() {
     let config = load_config(config_path, "APPCFG").unwrap();
 
     // Generate keys if they don't exist
-    let (_, pk_b64, sk, sk_b64) = match default_crypto_lib {
+    let (pk, pk_b64, sk, sk_b64) = match default_crypto_lib {
         CryptoLibrary::NaCl => {
             let (_, sk_nacl) = box_::gen_keypair();
             let sk = StaticSecretDalek::from(sk_nacl.0);
@@ -290,7 +290,13 @@ async fn main() {
         .build();
 
     // Uncomment to send an email
-    send_email(&config, &address_book, &mailer);
+    send_email(
+        config.identity.name.clone(),
+        config.identity.address.clone(),
+        pk,
+        &address_book,
+        &mailer,
+    );
 
     // Store our async handles in a vector
     let mut handles = vec![];
@@ -352,7 +358,7 @@ async fn main() {
                                             "This is an intermediate packet that must be forwarded"
                                         );
                                         let from: LettreMailbox =
-                                            format!("{} <{}>", name, email_address.clone())
+                                            format!("{} <{}>", &name, &email_address)
                                                 .parse()
                                                 .unwrap();
                                         let mut to_addr_vec = next_hop_address.to_bytes().to_vec();
@@ -398,13 +404,25 @@ async fn main() {
                                             println!("This inbox is the final destination of the payload");
                                             let payload_decoded =
                                                 BASE64_STANDARD.decode(payload_b64).unwrap();
-                                            let payload_string =
-                                                String::from_utf8(payload_decoded).unwrap();
-                                            println!("Payload: {}", payload_string);
+
+                                            if let Ok(surb) = SURB::from_bytes(&payload_decoded) {
+                                                println!("Payload is a SURB, responding");
+                                                use_surb(
+                                                    &name,
+                                                    &email_address,
+                                                    surb,
+                                                    "XATTACKXHASXBEGUNX",
+                                                    &mailer,
+                                                );
+                                            } else {
+                                                let payload_string =
+                                                    String::from_utf8(payload_decoded).unwrap();
+                                                println!("Payload: {}", payload_string);
+                                            }
                                         } else {
                                             println!("WARNING: This inbox is not the final destination of the payload, payload must be forwarded in plaintext");
                                             let from: LettreMailbox =
-                                                format!("{} <{}>", name, email_address.clone())
+                                                format!("{} <{}>", &name, &email_address)
                                                     .parse()
                                                     .unwrap();
                                             let to: LettreMailbox = to_addr.parse().unwrap();
@@ -498,11 +516,24 @@ fn string_to_byte_array_32(s: String) -> [u8; 32] {
 }
 
 fn build_sphinx_packet(
-    sender_addr: String,
-    destination_addr: String,
+    sender_tuple: (String, PublicKeyDalek),
+    destination_tuple: (String, PublicKeyDalek),
     route: Vec<(String, PublicKeyDalek)>,
 ) -> String {
-    let sphinx_route: Vec<Node> = route
+    // Define destination
+    let destination = Destination::new(
+        DestinationAddressBytes::from_bytes(string_to_byte_array_32(destination_tuple.0)),
+        [0u8; 16],
+    );
+
+    // Define sender
+    let sender = Destination::new(
+        DestinationAddressBytes::from_bytes(string_to_byte_array_32(sender_tuple.0.clone())),
+        [1u8; 16],
+    );
+
+    // Define forward route
+    let mut forward_route: Vec<Node> = route
         .into_iter()
         .map(|(addr, pk)| {
             Node::new(
@@ -511,58 +542,61 @@ fn build_sphinx_packet(
             )
         })
         .collect();
-    let mut surb_route = sphinx_route.clone();
-    surb_route.reverse();
 
-    // Define destination
-    let destination = Destination::new(
-        DestinationAddressBytes::from_bytes(string_to_byte_array_32(destination_addr)),
-        [0u8; 16],
-    );
+    // Define SURB route as reverse of forward route
+    let mut reverse_route = forward_route.clone();
+    reverse_route.reverse();
 
-    // Define sender
-    let sender = Destination::new(
-        DestinationAddressBytes::from_bytes(string_to_byte_array_32(sender_addr)),
-        [1u8; 16],
-    );
+    // Add last endpoint to each route
+    forward_route.push(Node::new(
+        NodeAddressBytes::from_bytes(destination.address.as_bytes()),
+        destination_tuple.1,
+    ));
+    reverse_route.push(Node::new(
+        NodeAddressBytes::from_bytes(sender.address.as_bytes()),
+        sender_tuple.1,
+    ));
 
     // Generate the SURB
     let surb_initial_secret = StaticSecretDalek::random();
     let surb_average_delay = Duration::from_secs(3);
-    let surb_delays = delays::generate_from_average_duration(surb_route.len(), surb_average_delay);
+    let surb_delays =
+        delays::generate_from_average_duration(reverse_route.len(), surb_average_delay);
     let surb = SURB::new(
         surb_initial_secret,
-        SURBMaterial::new(surb_route, surb_delays, sender),
+        SURBMaterial::new(reverse_route, surb_delays, sender),
     )
     .unwrap();
-    let surb_bytes = surb.to_bytes();
-    let plain_bytes = BASE64_STANDARD.encode("XATTACKXATXDAWNX".as_bytes());
+    let surb_b64 = BASE64_STANDARD.encode(surb.to_bytes()).into_bytes();
+    println!("SURB is {} bytes long", surb_b64.len());
+    let plain_b64 = BASE64_STANDARD
+        .encode("XATTACKXATXDAWNX".as_bytes())
+        .into_bytes();
 
     // Generate the Sphinx packet containing the SURB as payload
     let average_delay = Duration::from_secs(1);
-    let delays = delays::generate_from_average_duration(sphinx_route.len(), average_delay);
-    let sphinx_packet = SphinxPacket::new(
-        plain_bytes.into_bytes(),
-        &sphinx_route,
-        &destination,
-        &delays,
-    )
-    .unwrap();
+    let delays = delays::generate_from_average_duration(forward_route.len(), average_delay);
+    let sphinx_packet = SphinxPacket::new(surb_b64, &forward_route, &destination, &delays).unwrap();
 
     BASE64_STANDARD.encode(sphinx_packet.to_bytes())
 }
 
 fn send_email(
-    config: &ShallotConfig,
+    sender_name: String,
+    sender_addr: String,
+    sender_pk: PublicKeyDalek,
     address_book: &HashMap<String, &PublicIdentityConfig>,
     mailer: &SmtpTransport,
 ) {
     let route_addrs = [
         "johncamacuk@yahoo.com".to_string(),
-        "johncamacuk@gmail.com".to_string(),
+        //"johncamacuk@gmail.com".to_string(),
     ];
-    let sender_addr = config.identity.address.clone();
     let destination_addr = "johncamacuk@gmail.com".to_string();
+    let destination_pk = address_book
+        .get(destination_addr.as_str())
+        .unwrap()
+        .public_key;
 
     let packet = {
         let route = route_addrs
@@ -573,11 +607,15 @@ fn send_email(
                     .map(|entry| (addr.to_string(), entry.public_key))
             })
             .collect();
-        build_sphinx_packet(sender_addr, destination_addr, route)
+        build_sphinx_packet(
+            (sender_addr.clone(), sender_pk),
+            (destination_addr, destination_pk),
+            route,
+        )
     };
 
     // Construct email
-    let from: LettreMailbox = format!("{} <{}>", config.identity.name, config.identity.address)
+    let from: LettreMailbox = format!("{} <{}>", sender_name, sender_addr)
         .parse()
         .unwrap();
     let to: LettreMailbox = format!("{} <{}>", "John Camacuk", "johncamacuk@yahoo.com")
@@ -594,6 +632,45 @@ fn send_email(
     println!("Sending message");
     mailer.send(&email).unwrap();
     println!("Message sent");
+}
+
+fn use_surb(
+    from_name: &str,
+    from_address: &str,
+    surb: SURB,
+    message: &str,
+    mailer: &SmtpTransport,
+) {
+    let message_b64 = BASE64_STANDARD.encode(message.as_bytes());
+    match surb.use_surb(message_b64.as_bytes(), 1024) {
+        Ok((packet, next_hop_address)) => {
+            let packet_b64 = BASE64_STANDARD.encode(packet.to_bytes());
+
+            // Construct email
+            let from: LettreMailbox = format!("{} <{}>", from_name, from_address).parse().unwrap();
+            let mut to_addr_vec = next_hop_address.to_bytes().to_vec();
+            let to_addr = match to_addr_vec.iter().rposition(|&b| b != 0u8) {
+                Some(len) => {
+                    to_addr_vec.truncate(len + 1);
+                    String::from_utf8(to_addr_vec).unwrap()
+                }
+                None => String::from_utf8(to_addr_vec).unwrap(),
+            };
+            let to: LettreMailbox = to_addr.parse().unwrap();
+            let email = LettreMessage::builder()
+                .from(from.clone())
+                .to(to.clone())
+                .subject("shallot")
+                .header(LettreContentType::TEXT_PLAIN)
+                .body(packet_b64)
+                .unwrap();
+
+            println!("Sending message");
+            mailer.send(&email).unwrap();
+            println!("Message sent");
+        }
+        Err(e) => println!("Could not use SURB: {}", e),
+    };
 }
 
 fn build_address_book(
