@@ -33,8 +33,9 @@ use x25519_dalek::{PublicKey as PublicKeyDalek, StaticSecret as StaticSecretDale
 
 mod deserialization;
 use deserialization::{
-    as_base64, string_is_duration_option, string_is_ecc_public_key, string_is_ecc_public_key_dalek,
-    string_is_ecc_secret_key, string_is_ecc_secret_key_dalek, string_is_nonce,
+    as_base64, string_is_duration_option, string_is_ecc_public_key_dalek,
+    string_is_ecc_public_key_nacl, string_is_ecc_secret_key_dalek, string_is_ecc_secret_key_nacl,
+    string_is_nonce,
 };
 mod oauth2;
 use oauth2::OAuth2Config;
@@ -72,11 +73,10 @@ enum AuthType {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-//#[serde(tag = "type")]
 enum SecretKey {
     #[serde(
         serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_secret_key",
+        deserialize_with = "string_is_ecc_secret_key_nacl",
         rename = "nacl"
     )]
     NaCl(SecretKeyNaCl),
@@ -92,16 +92,15 @@ enum SecretKey {
 struct SecretIdentityConfig {
     address: String,
     name: String,
-    #[serde(rename = "secretkey")]
+    #[serde(default, rename = "secretkey")]
     secret_key: Option<SecretKey>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-//#[serde(tag = "type")]
 enum PublicKey {
     #[serde(
         serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_public_key",
+        deserialize_with = "string_is_ecc_public_key_nacl",
         rename = "nacl"
     )]
     NaCl(PublicKeyNaCl),
@@ -145,7 +144,7 @@ struct ShallotMessage {
 struct ShallotMessageWrapper {
     #[serde(
         serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_public_key"
+        deserialize_with = "string_is_ecc_public_key_nacl"
     )]
     ephemeral_key: PublicKeyNaCl,
     #[serde(serialize_with = "as_base64", deserialize_with = "string_is_nonce")]
@@ -221,6 +220,15 @@ enum CryptoLibrary {
     Dalek,
 }
 
+impl std::fmt::Display for CryptoLibrary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NaCl => f.write_str("nacl"),
+            Self::Dalek => f.write_str("dalek"),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Set our default crypto library
@@ -234,14 +242,14 @@ async fn main() {
     let (_, pk_b64, sk, sk_b64) = match default_crypto_lib {
         CryptoLibrary::NaCl => {
             let (pk, sk) = box_::gen_keypair();
-            let pk_b64 = BASE64_STANDARD.encode(&pk);
+            let pk_b64 = BASE64_STANDARD.encode(pk);
             let sk_b64 = BASE64_STANDARD.encode(&sk);
             (PublicKey::NaCl(pk), pk_b64, SecretKey::NaCl(sk), sk_b64)
         }
         CryptoLibrary::Dalek => {
             let sk = StaticSecretDalek::random();
             let pk = PublicKeyDalek::from(&sk);
-            let pk_b64 = BASE64_STANDARD.encode(&pk);
+            let pk_b64 = BASE64_STANDARD.encode(pk);
             let sk_b64 = BASE64_STANDARD.encode(&sk);
             (PublicKey::Dalek(pk), pk_b64, SecretKey::Dalek(sk), sk_b64)
         }
@@ -249,8 +257,14 @@ async fn main() {
     let sk = match config.identity.secret_key {
         Some(ref sk) => sk,
         None => {
-            println!("Generated secret key: {}", BASE64_STANDARD.encode(sk_b64),);
-            println!("Generated public key: {}", BASE64_STANDARD.encode(pk_b64),);
+            println!("Generated new key material using {}", default_crypto_lib);
+            println!("Generated secret key: {}", sk_b64);
+            println!("Generated public key: {}", pk_b64);
+            println!(
+                "To persist, set the environment variable APPCFG_IDENTITY_SECRETKEY_{}=\"{}\"",
+                default_crypto_lib.to_string().to_uppercase(),
+                sk_b64,
+            );
             &sk
         }
     };
@@ -462,6 +476,7 @@ async fn main() {
                                             next_hop_address,
                                             delay,
                                         } => {
+                                            println!("This is an intermediate packet that must be forwarded");
                                             let from: LettreMailbox =
                                                 format!("{} <{}>", name, email_address.clone())
                                                     .parse()
@@ -495,6 +510,9 @@ async fn main() {
                                             identifier,
                                             payload,
                                         } => {
+                                            println!(
+                                                "This is the final encrypted hop of the payload"
+                                            );
                                             let mut to_addr_vec = destination.as_bytes().to_vec();
                                             let to_addr =
                                                 match to_addr_vec.iter().rposition(|&b| b != 0u8) {
@@ -504,28 +522,28 @@ async fn main() {
                                                     }
                                                     None => String::from_utf8(to_addr_vec).unwrap(),
                                                 };
+                                            let payload_b64 = payload.recover_plaintext().unwrap();
                                             if to_addr == email_address.clone() {
-                                                let payload_decoded = BASE64_STANDARD
-                                                    .decode(payload.into_bytes())
-                                                    .unwrap();
+                                                println!("This inbox is the final destination of the payload");
+                                                let payload_decoded =
+                                                    BASE64_STANDARD.decode(payload_b64).unwrap();
                                                 let payload_string =
                                                     String::from_utf8(payload_decoded).unwrap();
-                                                println!("Final payload: {}", payload_string);
+                                                println!("Payload: {}", payload_string);
                                             } else {
+                                                println!("WARNING: This inbox is not the final destination of the payload, payload must be forwarded in plaintext");
                                                 let from: LettreMailbox =
                                                     format!("{} <{}>", name, email_address.clone())
                                                         .parse()
                                                         .unwrap();
                                                 let to: LettreMailbox = to_addr.parse().unwrap();
-                                                let body =
-                                                    BASE64_STANDARD.encode(payload.into_bytes());
                                                 println!("Forwarding payload to: {}", to);
                                                 let email = LettreMessage::builder()
                                                     .from(from)
                                                     .to(to)
                                                     .subject("shallot")
                                                     .header(LettreContentType::TEXT_PLAIN)
-                                                    .body(body)
+                                                    .body(payload_b64)
                                                     .unwrap();
                                                 mailer.send(&email).unwrap();
                                             }
@@ -615,14 +633,14 @@ fn build_custom_packet(
     let (surb, secret_keys) =
         SingleUseReplyBlock::new(sender_addr, surb_route.as_slice(), None).unwrap();
     let surb_string_b64 = BASE64_STANDARD.encode(serde_yaml::to_string(&surb).unwrap());
+    let plain_string_b64 = BASE64_STANDARD.encode("XATTACKXATXDAWNX");
 
     // Add destination to links list
     let mut route = route.clone();
     route.push((destination_addr, destination_pk));
 
     // Create message
-    let plain_string_b64 = BASE64_STANDARD.encode("XATTACKXATXDAWNX");
-    let mut prev_bytes = plain_string_b64;
+    let mut prev_bytes = surb_string_b64;
     let mut prev_header = None;
     for (addr, pk) in route.into_iter().rev() {
         let sm = ShallotMessage {
@@ -722,7 +740,10 @@ fn send_email(
     sk: &SecretKey,
     mailer: &SmtpTransport,
 ) -> Vec<SecretKeyNaCl> {
-    let route_addrs = ["johncamacuk@yahoo.com".to_string()];
+    let route_addrs = [
+        "johncamacuk@yahoo.com".to_string(),
+        "johncamacuk@gmail.com".to_string(),
+    ];
     let sender_addr = config.identity.address.clone();
     let destination_addr = "johncamacuk@gmail.com".to_string();
     let destination_entry = address_book.get(&destination_addr).unwrap();

@@ -76,7 +76,7 @@ impl Display for DurationDeserializationError {
     }
 }
 
-pub fn string_is_ecc_public_key<'de, D>(deserializer: D) -> Result<PublicKeyNaCl, D::Error>
+pub fn string_is_ecc_public_key_nacl<'de, D>(deserializer: D) -> Result<PublicKeyNaCl, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -93,7 +93,7 @@ where
     }
 }
 
-pub fn string_is_ecc_public_key_option<'de, D>(
+pub fn string_is_ecc_public_key_nacl_option<'de, D>(
     deserializer: D,
 ) -> Result<Option<PublicKeyNaCl>, D::Error>
 where
@@ -152,7 +152,7 @@ where
 //     }
 // }
 
-pub fn string_is_ecc_secret_key<'de, D>(deserializer: D) -> Result<SecretKeyNaCl, D::Error>
+pub fn string_is_ecc_secret_key_nacl<'de, D>(deserializer: D) -> Result<SecretKeyNaCl, D::Error>
 where
     D: Deserializer<'de>,
 {

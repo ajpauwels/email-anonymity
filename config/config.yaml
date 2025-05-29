@@ -1,5 +1,6 @@
 auth:
-  type: oauth2
+  type: "oauth2"
+  password: ""
   oauth2:
     clientid: ""
     clientsecret: ""
@@ -19,13 +20,17 @@ mailboxes:
 identity:
   address: "alexj.pauwels@gmail.com"
   name: "Alexandre Pauwels"
-  secretkey: {}
+  # secretkey:
+  #   nacl: ""
+  #   dalek: ""
 addressbook:
-- address: "johncamacuk@gmail.com"
-  name: "John Camacuk Gmail"
-  publickey:
-    nacl: "xDaZE2I9pPfagsxv4T4XYKFFEBZll3+5jIVzFX/0STo="
 - address: "johncamacuk@yahoo.com"
   name: "John Camacuk Yahoo"
   publickey:
-    nacl: "W+7h6HeuHBYuybIWGMhYkpki2eXW3Oao9wORYcc5yR8="
+    # nacl: "W+7h6HeuHBYuybIWGMhYkpki2eXW3Oao9wORYcc5yR8="
+    dalek: "o42ZHseYE1W2ydS9Qk65z1Tk2K/N8nnu4C++TFWjJn4="
+- address: "johncamacuk@gmail.com"
+  name: "John Camacuk Gmail"
+  publickey:
+    # nacl: "xDaZE2I9pPfagsxv4T4XYKFFEBZll3+5jIVzFX/0STo="
+    dalek: "dYbvsW7JV9g29AYqqabdJsgR1qSdlG8mZQYlYWXjLV4="

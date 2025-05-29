@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use sodiumoxide::crypto::box_::{self, Nonce, PublicKey, SecretKey};
 
 use crate::deserialization::{
-    as_base64, as_base64_option, string_is_ecc_public_key, string_is_ecc_public_key_option,
-    string_is_nonce, string_is_nonce_option,
+    as_base64, as_base64_option, string_is_ecc_public_key_nacl,
+    string_is_ecc_public_key_nacl_option, string_is_nonce, string_is_nonce_option,
 };
 
 // Errors that can occur during processing of a SURB
@@ -121,7 +121,7 @@ pub struct Link {
 pub struct SingleUseReplyBlockReverseLayer {
     #[serde(
         serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_public_key"
+        deserialize_with = "string_is_ecc_public_key_nacl"
     )]
     encryption_public_key: PublicKey,
     #[serde(serialize_with = "as_base64", deserialize_with = "string_is_nonce")]
@@ -141,7 +141,7 @@ pub struct SingleUseReplyBlockReverseLayer {
 pub struct SingleUseReplyBlockForwardLayer {
     #[serde(
         serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_public_key"
+        deserialize_with = "string_is_ecc_public_key_nacl"
     )]
     decryption_public_key: PublicKey,
     #[serde(serialize_with = "as_base64", deserialize_with = "string_is_nonce")]
@@ -160,7 +160,7 @@ pub struct SingleUseReplyBlock {
         default,
         skip_serializing_if = "Option::is_none",
         serialize_with = "as_base64_option",
-        deserialize_with = "string_is_ecc_public_key_option"
+        deserialize_with = "string_is_ecc_public_key_nacl_option"
     )]
     decryption_public_key: Option<PublicKey>,
     #[serde(
