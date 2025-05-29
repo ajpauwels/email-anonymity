@@ -195,7 +195,7 @@ async fn main() {
     let config = load_config(config_path, "APPCFG").unwrap();
 
     // Generate keys if they don't exist
-    let (pk, pk_b64, sk, sk_b64) = match default_crypto_lib {
+    let (_, pk_b64, sk, sk_b64) = match default_crypto_lib {
         CryptoLibrary::NaCl => {
             let (_, sk_nacl) = box_::gen_keypair();
             let sk = StaticSecretDalek::from(sk_nacl.0);
@@ -226,6 +226,7 @@ async fn main() {
             &sk
         }
     };
+    let pk = PublicKeyDalek::from(sk);
 
     // Generate the address book hashmap
     let address_book = build_address_book(config.address_book.as_ref());
@@ -588,10 +589,7 @@ fn send_email(
     address_book: &HashMap<String, &PublicIdentityConfig>,
     mailer: &SmtpTransport,
 ) {
-    let route_addrs = [
-        "johncamacuk@yahoo.com".to_string(),
-        //"johncamacuk@gmail.com".to_string(),
-    ];
+    let route_addrs = ["johncamacuk@yahoo.com".to_string()];
     let destination_addr = "johncamacuk@gmail.com".to_string();
     let destination_pk = address_book
         .get(destination_addr.as_str())
