@@ -15,3 +15,7 @@ Cargo.lock
 
 # Don't include env files that may contains secrets
 *.env
+
+# Exclude the entire config directory, except for the base template
+config/
+!config/config_base.yaml
