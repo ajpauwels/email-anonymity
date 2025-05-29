@@ -19,13 +19,10 @@ use lettre::{
 };
 use mail_parser::MessageParser;
 use serde::{Deserialize, Serialize};
-use sodiumoxide::crypto::box_::{
-    self, Nonce, PublicKey as PublicKeyNaCl, SecretKey as SecretKeyNaCl,
-};
+use sodiumoxide::crypto::box_::{self, PublicKey as PublicKeyNaCl, SecretKey as SecretKeyNaCl};
 use sphinx_packet::header::delays;
 use sphinx_packet::route::{Destination, DestinationAddressBytes, Node, NodeAddressBytes};
 use sphinx_packet::{ProcessedPacketData, SURBMaterial, SphinxPacket, SURB};
-use surb::{Link, SingleUseReplyBlock};
 use tiny_http::{Response, Server};
 use tokio::time::sleep;
 use url::Url;
@@ -35,11 +32,9 @@ mod deserialization;
 use deserialization::{
     as_base64, string_is_duration_option, string_is_ecc_public_key_dalek,
     string_is_ecc_public_key_nacl, string_is_ecc_secret_key_dalek, string_is_ecc_secret_key_nacl,
-    string_is_nonce,
 };
 mod oauth2;
 use oauth2::OAuth2Config;
-mod surb;
 
 #[derive(Deserialize)]
 struct SmtpConfig {
@@ -127,29 +122,6 @@ struct ShallotConfig {
     identity: SecretIdentityConfig,
     #[serde(rename = "addressbook")]
     address_book: Vec<PublicIdentityConfig>,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-struct ShallotHeader {
-    next: String,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-struct ShallotMessage {
-    header: Option<ShallotHeader>,
-    body: String,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-struct ShallotMessageWrapper {
-    #[serde(
-        serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_public_key_nacl"
-    )]
-    ephemeral_key: PublicKeyNaCl,
-    #[serde(serialize_with = "as_base64", deserialize_with = "string_is_nonce")]
-    nonce: Nonce,
-    message: String,
 }
 
 #[derive(Clone)]
@@ -336,8 +308,7 @@ async fn main() {
         .build();
 
     // Uncomment to send an email
-    let secret_keys = send_email(&config, &address_book, sk, &mailer);
-    // let secret_keys = vec![];
+    send_email(&config, &address_book, &mailer);
 
     // Store our async handles in a vector
     let mut handles = vec![];
@@ -352,7 +323,6 @@ async fn main() {
         let imap_domain = config.auth.imap.address.clone();
         let idle_keepalive = config.auth.imap.keepalive;
         let poll_interval = config.auth.imap.poll;
-        let secret_keys = secret_keys.clone();
 
         let listener = tokio::spawn(async move {
             // Log in to IMAP
@@ -388,85 +358,7 @@ async fn main() {
                             let body_b64 = message.body_text(0).unwrap();
                             let body = BASE64_STANDARD.decode(body_b64.trim()).unwrap();
 
-                            if let Ok(sm_wrapped) =
-                                serde_yaml::from_slice::<ShallotMessageWrapper>(&body)
-                            {
-                                if let SecretKey::NaCl(ref sk) = sk {
-                                    let sm_encrypted =
-                                        BASE64_STANDARD.decode(&sm_wrapped.message).unwrap();
-                                    let sm_decrypted = box_::open(
-                                        &sm_encrypted,
-                                        &sm_wrapped.nonce,
-                                        &sm_wrapped.ephemeral_key,
-                                        sk,
-                                    )
-                                    .unwrap();
-                                    let sm: ShallotMessage =
-                                        serde_yaml::from_slice(&sm_decrypted).unwrap();
-
-                                    match sm.header {
-                                        Some(header) => {
-                                            let from: LettreMailbox =
-                                                format!("{} <{}>", name, email_address.clone())
-                                                    .parse()
-                                                    .unwrap();
-                                            let to: LettreMailbox = header.next.parse().unwrap();
-                                            println!("Forwarding message to: {}", to);
-                                            let email = LettreMessage::builder()
-                                                .from(from)
-                                                .to(to)
-                                                .subject("shallot")
-                                                .header(LettreContentType::TEXT_PLAIN)
-                                                // .header(PublicKeyHeader {
-                                                //     key: "0xDEADBEEF".to_owned(),
-                                                // })
-                                                .body(sm.body)
-                                                .unwrap();
-                                            mailer.send(&email).unwrap();
-                                        }
-                                        None => {
-                                            let m_bytes = &BASE64_STANDARD.decode(sm.body).unwrap();
-                                            let m = std::str::from_utf8(m_bytes).unwrap();
-                                            match serde_yaml::from_str::<SingleUseReplyBlock>(m) {
-                                                Ok(surb) => {
-                                                    let response_msg = "XATTACKXHASXBEGUNX";
-                                                    println!("Message is a shallot message containing a SURB, sending SURB back with response {}", response_msg);
-                                                    surb.process(
-                                                        email_address.clone(),
-                                                        Some(response_msg),
-                                                        &sk,
-                                                        &secret_keys,
-                                                        &mailer,
-                                                    )
-                                                    .unwrap();
-                                                }
-                                                Err(e) => {
-                                                    println!("{}", e);
-                                                    println!("Message is: {}", m);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            } else if let Ok(surb) =
-                                serde_yaml::from_slice::<SingleUseReplyBlock>(&body)
-                            {
-                                println!("Message is a SURB that needs to be either forwarded or the payload unraveled locally");
-                                if let SecretKey::NaCl(ref sk) = sk {
-                                    let msg = surb
-                                        .process(
-                                            email_address.clone(),
-                                            None,
-                                            sk,
-                                            &secret_keys,
-                                            &mailer,
-                                        )
-                                        .unwrap();
-                                    if let Some(msg) = msg {
-                                        println!("SURB response: {}", msg);
-                                    }
-                                }
-                            } else if let Ok(packet) = SphinxPacket::from_bytes(&body) {
+                            if let Ok(packet) = SphinxPacket::from_bytes(&body) {
                                 println!("This is a Sphinx packet");
                                 if let SecretKey::Dalek(ref sk) = sk {
                                     println!("Local secret key is of Dalek-type");
@@ -613,57 +505,6 @@ async fn main() {
     futures::future::join_all(handles).await;
 }
 
-fn build_custom_packet(
-    sender_addr: String,
-    destination_addr: String,
-    destination_pk: PublicKeyNaCl,
-    route: Vec<(String, PublicKeyNaCl)>,
-) -> (String, Vec<SecretKeyNaCl>) {
-    // Create the SURB
-    let surb_route: Vec<Link> = route
-        .clone()
-        .into_iter()
-        .rev()
-        .map(|(addr, pk)| Link {
-            address: addr,
-            public_key: pk,
-        })
-        .collect();
-
-    let (surb, secret_keys) =
-        SingleUseReplyBlock::new(sender_addr, surb_route.as_slice(), None).unwrap();
-    let surb_string_b64 = BASE64_STANDARD.encode(serde_yaml::to_string(&surb).unwrap());
-    let plain_string_b64 = BASE64_STANDARD.encode("XATTACKXATXDAWNX");
-
-    // Add destination to links list
-    let mut route = route.clone();
-    route.push((destination_addr, destination_pk));
-
-    // Create message
-    let mut prev_bytes = surb_string_b64;
-    let mut prev_header = None;
-    for (addr, pk) in route.into_iter().rev() {
-        let sm = ShallotMessage {
-            header: prev_header,
-            body: prev_bytes,
-        };
-        let (sm_pk, sm_sk) = box_::gen_keypair();
-        let sm_nonce = box_::gen_nonce();
-        let sm_string = serde_yaml::to_string(&sm).unwrap();
-        let sm_encrypted = box_::seal(sm_string.as_bytes(), &sm_nonce, &pk, &sm_sk);
-        let sm_encrypted_b64 = BASE64_STANDARD.encode(&sm_encrypted);
-        let sm_wrapped = ShallotMessageWrapper {
-            ephemeral_key: sm_pk,
-            nonce: sm_nonce,
-            message: sm_encrypted_b64,
-        };
-        let sm_wrapped_string = serde_yaml::to_string(&sm_wrapped).unwrap();
-        prev_bytes = BASE64_STANDARD.encode(&sm_wrapped_string);
-        prev_header = Some(ShallotHeader { next: addr });
-    }
-    (prev_bytes, secret_keys)
-}
-
 // Takes a string and converts it to an array of 32-bytes, panicking
 // if the string is too long, and filling the rest of the array with
 // zeros if it's too short
@@ -682,7 +523,7 @@ fn build_sphinx_packet(
     sender_addr: String,
     destination_addr: String,
     route: Vec<(String, PublicKeyDalek)>,
-) -> (String, Vec<SecretKeyNaCl>) {
+) -> String {
     let sphinx_route: Vec<Node> = route
         .into_iter()
         .map(|(addr, pk)| {
@@ -730,64 +571,37 @@ fn build_sphinx_packet(
     )
     .unwrap();
 
-    let sphinx_packet_bytes = BASE64_STANDARD.encode(sphinx_packet.to_bytes());
-    (sphinx_packet_bytes, vec![])
+    BASE64_STANDARD.encode(sphinx_packet.to_bytes())
 }
 
 fn send_email(
     config: &ShallotConfig,
     address_book: &HashMap<String, &PublicIdentityConfig>,
-    sk: &SecretKey,
     mailer: &SmtpTransport,
-) -> Vec<SecretKeyNaCl> {
+) {
     let route_addrs = [
         "johncamacuk@yahoo.com".to_string(),
         "johncamacuk@gmail.com".to_string(),
     ];
     let sender_addr = config.identity.address.clone();
     let destination_addr = "johncamacuk@gmail.com".to_string();
-    let destination_entry = address_book.get(&destination_addr).unwrap();
 
-    let (packet, secret_keys) = match sk {
-        SecretKey::NaCl(_) => {
-            let route = route_addrs
-                .iter()
-                .filter_map(|addr| {
-                    if let Some(entry) = address_book.get(addr.as_str()) {
-                        if let PublicKey::NaCl(pk) = entry.public_key {
-                            Some((addr.to_string(), pk))
-                        } else {
-                            None
-                        }
+    let packet = {
+        let route = route_addrs
+            .iter()
+            .filter_map(|addr| {
+                if let Some(entry) = address_book.get(addr.as_str()) {
+                    if let PublicKey::Dalek(pk) = entry.public_key {
+                        Some((addr.to_string(), pk))
                     } else {
                         None
                     }
-                })
-                .collect();
-            let destination_pk = if let PublicKey::NaCl(pk) = destination_entry.public_key {
-                pk
-            } else {
-                panic!("Destination public key was not sodiumoxide");
-            };
-            build_custom_packet(sender_addr, destination_addr, destination_pk, route)
-        }
-        SecretKey::Dalek(_) => {
-            let route = route_addrs
-                .iter()
-                .filter_map(|addr| {
-                    if let Some(entry) = address_book.get(addr.as_str()) {
-                        if let PublicKey::Dalek(pk) = entry.public_key {
-                            Some((addr.to_string(), pk))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            build_sphinx_packet(sender_addr, destination_addr, route)
-        }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        build_sphinx_packet(sender_addr, destination_addr, route)
     };
 
     // Construct email
@@ -808,8 +622,6 @@ fn send_email(
     println!("Sending message");
     mailer.send(&email).unwrap();
     println!("Message sent");
-
-    secret_keys
 }
 
 fn build_address_book(
