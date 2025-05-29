@@ -18,8 +18,9 @@ use lettre::{
     Message as LettreMessage, SmtpTransport, Transport,
 };
 use mail_parser::MessageParser;
+use oauth2::OAuth2Config;
 use serde::{Deserialize, Serialize};
-use sodiumoxide::crypto::box_::{self, PublicKey as PublicKeyNaCl, SecretKey as SecretKeyNaCl};
+use sodiumoxide::crypto::box_::{self};
 use sphinx_packet::header::delays;
 use sphinx_packet::route::{Destination, DestinationAddressBytes, Node, NodeAddressBytes};
 use sphinx_packet::{ProcessedPacketData, SURBMaterial, SphinxPacket, SURB};
@@ -30,95 +31,78 @@ use x25519_dalek::{PublicKey as PublicKeyDalek, StaticSecret as StaticSecretDale
 
 mod deserialization;
 use deserialization::{
-    as_base64, string_is_duration_option, string_is_ecc_public_key_dalek,
-    string_is_ecc_public_key_nacl, string_is_ecc_secret_key_dalek, string_is_ecc_secret_key_nacl,
+    as_base64, as_base64_option, as_durationstring_option, string_is_duration_option,
+    string_is_ecc_public_key_dalek, string_is_ecc_secret_key_dalek_option,
 };
 mod oauth2;
-use oauth2::OAuth2Config;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct SmtpConfig {
     address: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ImapConfig {
     address: String,
-    #[serde(default, deserialize_with = "string_is_duration_option")]
+    #[serde(
+        default,
+        serialize_with = "as_durationstring_option",
+        deserialize_with = "string_is_duration_option"
+    )]
     keepalive: Option<Duration>,
-    #[serde(default, deserialize_with = "string_is_duration_option")]
+    #[serde(
+        default,
+        serialize_with = "as_durationstring_option",
+        deserialize_with = "string_is_duration_option"
+    )]
     poll: Option<Duration>,
 }
 
-#[derive(Deserialize)]
-struct AuthConfig {
-    r#type: AuthType,
-    oauth2: Option<OAuth2Config>,
-    password: Option<String>,
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(tag = "type")]
+enum AuthConfig {
+    #[serde(rename = "oauth2")]
+    OAuth2(OAuth2Config),
+    #[serde(rename = "password")]
+    Password { password: String },
+}
+
+#[derive(Deserialize, Serialize)]
+struct EmailConfig {
+    auth: AuthConfig,
     smtp: SmtpConfig,
     imap: ImapConfig,
+    mailboxes: Vec<String>,
 }
 
-#[derive(Deserialize, Copy, Clone)]
-enum AuthType {
-    #[serde(rename = "oauth2")]
-    OAuth2,
-    #[serde(rename = "password")]
-    Password,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-enum SecretKey {
-    #[serde(
-        serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_secret_key_nacl",
-        rename = "nacl"
-    )]
-    NaCl(SecretKeyNaCl),
-    #[serde(
-        serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_secret_key_dalek",
-        rename = "dalek"
-    )]
-    Dalek(StaticSecretDalek),
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct SecretIdentityConfig {
     address: String,
     name: String,
-    #[serde(default, rename = "secretkey")]
-    secret_key: Option<SecretKey>,
+    #[serde(
+        default,
+        rename = "secretkey",
+        serialize_with = "as_base64_option",
+        deserialize_with = "string_is_ecc_secret_key_dalek_option"
+    )]
+    secret_key: Option<StaticSecretDalek>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-enum PublicKey {
-    #[serde(
-        serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_public_key_nacl",
-        rename = "nacl"
-    )]
-    NaCl(PublicKeyNaCl),
-    #[serde(
-        serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_public_key_dalek",
-        rename = "dalek"
-    )]
-    Dalek(PublicKeyDalek),
-}
-
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PublicIdentityConfig {
     address: String,
     name: String,
-    #[serde(rename = "publickey")]
-    public_key: PublicKey,
+    #[serde(
+        rename = "publickey",
+        serialize_with = "as_base64",
+        deserialize_with = "string_is_ecc_public_key_dalek"
+    )]
+    public_key: PublicKeyDalek,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ShallotConfig {
-    auth: AuthConfig,
-    mailboxes: Vec<String>,
+    email: EmailConfig,
     identity: SecretIdentityConfig,
     #[serde(rename = "addressbook")]
     address_book: Vec<PublicIdentityConfig>,
@@ -213,17 +197,19 @@ async fn main() {
     // Generate keys if they don't exist
     let (_, pk_b64, sk, sk_b64) = match default_crypto_lib {
         CryptoLibrary::NaCl => {
-            let (pk, sk) = box_::gen_keypair();
+            let (_, sk_nacl) = box_::gen_keypair();
+            let sk = StaticSecretDalek::from(sk_nacl.0);
+            let pk = PublicKeyDalek::from(&sk);
             let pk_b64 = BASE64_STANDARD.encode(pk);
             let sk_b64 = BASE64_STANDARD.encode(&sk);
-            (PublicKey::NaCl(pk), pk_b64, SecretKey::NaCl(sk), sk_b64)
+            (pk, pk_b64, sk, sk_b64)
         }
         CryptoLibrary::Dalek => {
             let sk = StaticSecretDalek::random();
             let pk = PublicKeyDalek::from(&sk);
             let pk_b64 = BASE64_STANDARD.encode(pk);
             let sk_b64 = BASE64_STANDARD.encode(&sk);
-            (PublicKey::Dalek(pk), pk_b64, SecretKey::Dalek(sk), sk_b64)
+            (pk, pk_b64, sk, sk_b64)
         }
     };
     let sk = match config.identity.secret_key {
@@ -241,18 +227,19 @@ async fn main() {
         }
     };
 
+    println!("{}", serde_yaml::to_string(&config).unwrap());
+
     // Generate the address book hashmap
     let address_book = build_address_book(config.address_book.as_ref());
 
-    let (password, smtp_auth_mechanism) = match config.auth.r#type {
-        AuthType::OAuth2 => {
+    let (password, smtp_auth_mechanism) = match config.email.auth {
+        AuthConfig::OAuth2(ref oauth2) => {
             // Build oauth2 redirect listener
-            let oauth2_config = config.auth.oauth2.as_ref().unwrap();
-            let redirect_url = Url::try_from(oauth2_config.redirect_url.as_str()).unwrap();
+            let redirect_url = Url::try_from(oauth2.redirect_url.as_str()).unwrap();
             let redirect_host = redirect_url.host_str().unwrap();
             let redirect_port = redirect_url.port_or_known_default().unwrap();
 
-            let access_token = match oauth2_config.access_token_override {
+            let access_token = match oauth2.access_token_override {
                 Some(ref t) => t.clone(),
                 None => {
                     // Create server to handle oauth2 redirect
@@ -261,7 +248,7 @@ async fn main() {
 
                     // Begin oauth2 flow
                     let (pkce_verifier, csrf_token) =
-                        oauth2::begin_oauth2_flow(oauth2_config.clone()).unwrap();
+                        oauth2::begin_oauth2_flow(oauth2.clone()).unwrap();
 
                     // Receive oauth2 redirection
                     let redirect_request = server.recv().unwrap();
@@ -280,7 +267,7 @@ async fn main() {
 
                     // Exchange authorization code for tokens
                     let token_response = oauth2::complete_oauth2_flow(
-                        oauth2_config.clone(),
+                        oauth2.clone(),
                         pkce_verifier,
                         oauth2_redirect_params.code,
                     )
@@ -293,15 +280,12 @@ async fn main() {
             };
             (access_token, LettreMechanism::Xoauth2)
         }
-        AuthType::Password => (
-            config.auth.password.clone().unwrap(),
-            LettreMechanism::Plain,
-        ),
+        AuthConfig::Password { ref password } => (password.clone(), LettreMechanism::Plain),
     };
 
     // Login to SMTP
     let smtp_creds = LettreCredentials::new(config.identity.address.clone(), password.clone());
-    let mailer = SmtpTransport::relay(config.auth.smtp.address.as_str())
+    let mailer = SmtpTransport::relay(config.email.smtp.address.as_str())
         .unwrap()
         .credentials(smtp_creds)
         .authentication(vec![smtp_auth_mechanism])
@@ -313,31 +297,32 @@ async fn main() {
     // Store our async handles in a vector
     let mut handles = vec![];
 
-    for mailbox in config.mailboxes.iter() {
+    for mailbox in config.email.mailboxes.iter() {
         let mailbox = mailbox.clone();
         let email_address = config.identity.address.clone();
         let name = config.identity.name.clone();
         let password = password.clone();
         let mailer = mailer.clone();
         let sk = sk.clone();
-        let imap_domain = config.auth.imap.address.clone();
-        let idle_keepalive = config.auth.imap.keepalive;
-        let poll_interval = config.auth.imap.poll;
+        let email_auth = config.email.auth.clone();
+        let imap_domain = config.email.imap.address.clone();
+        let idle_keepalive = config.email.imap.keepalive;
+        let poll_interval = config.email.imap.poll;
 
         let listener = tokio::spawn(async move {
             // Log in to IMAP
             let tls = native_tls::TlsConnector::builder().build().unwrap();
             let client =
                 imap::connect((imap_domain.as_str(), 993), imap_domain.as_str(), &tls).unwrap();
-            let mut imap_session = match config.auth.r#type {
-                AuthType::OAuth2 => {
+            let mut imap_session = match email_auth {
+                AuthConfig::OAuth2 { .. } => {
                     let gmail_auth = ImapOauth2 {
                         user: email_address.clone(),
                         access_token: password.clone(),
                     };
                     client.authenticate("XOAUTH2", &gmail_auth).unwrap()
                 }
-                AuthType::Password => client
+                AuthConfig::Password { .. } => client
                     .login(email_address.as_str(), password.as_str())
                     .unwrap(),
             };
@@ -360,88 +345,84 @@ async fn main() {
 
                             if let Ok(packet) = SphinxPacket::from_bytes(&body) {
                                 println!("This is a Sphinx packet");
-                                if let SecretKey::Dalek(ref sk) = sk {
-                                    println!("Local secret key is of Dalek-type");
-                                    match packet.process(sk).unwrap().data {
-                                        ProcessedPacketData::ForwardHop {
-                                            next_hop_packet,
-                                            next_hop_address,
-                                            delay,
-                                        } => {
-                                            println!("This is an intermediate packet that must be forwarded");
+                                match packet.process(&sk).unwrap().data {
+                                    ProcessedPacketData::ForwardHop {
+                                        next_hop_packet,
+                                        next_hop_address,
+                                        delay,
+                                    } => {
+                                        println!(
+                                            "This is an intermediate packet that must be forwarded"
+                                        );
+                                        let from: LettreMailbox =
+                                            format!("{} <{}>", name, email_address.clone())
+                                                .parse()
+                                                .unwrap();
+                                        let mut to_addr_vec = next_hop_address.to_bytes().to_vec();
+                                        let to_addr =
+                                            match to_addr_vec.iter().rposition(|&b| b != 0u8) {
+                                                Some(len) => {
+                                                    to_addr_vec.truncate(len + 1);
+                                                    String::from_utf8(to_addr_vec).unwrap()
+                                                }
+                                                None => String::from_utf8(to_addr_vec).unwrap(),
+                                            };
+                                        let to: LettreMailbox = to_addr.parse().unwrap();
+                                        let body =
+                                            BASE64_STANDARD.encode(next_hop_packet.to_bytes());
+                                        println!("Forwarding packet to: {}", to);
+                                        let email = LettreMessage::builder()
+                                            .from(from)
+                                            .to(to)
+                                            .subject("shallot")
+                                            .header(LettreContentType::TEXT_PLAIN)
+                                            .body(body)
+                                            .unwrap();
+                                        sleep(delay.to_duration()).await;
+                                        mailer.send(&email).unwrap();
+                                    }
+                                    ProcessedPacketData::FinalHop {
+                                        destination,
+                                        identifier,
+                                        payload,
+                                    } => {
+                                        println!("This is the final encrypted hop of the payload");
+                                        let mut to_addr_vec = destination.as_bytes().to_vec();
+                                        let to_addr =
+                                            match to_addr_vec.iter().rposition(|&b| b != 0u8) {
+                                                Some(len) => {
+                                                    to_addr_vec.truncate(len + 1);
+                                                    String::from_utf8(to_addr_vec).unwrap()
+                                                }
+                                                None => String::from_utf8(to_addr_vec).unwrap(),
+                                            };
+                                        let payload_b64 = payload.recover_plaintext().unwrap();
+                                        if to_addr == email_address.clone() {
+                                            println!("This inbox is the final destination of the payload");
+                                            let payload_decoded =
+                                                BASE64_STANDARD.decode(payload_b64).unwrap();
+                                            let payload_string =
+                                                String::from_utf8(payload_decoded).unwrap();
+                                            println!("Payload: {}", payload_string);
+                                        } else {
+                                            println!("WARNING: This inbox is not the final destination of the payload, payload must be forwarded in plaintext");
                                             let from: LettreMailbox =
                                                 format!("{} <{}>", name, email_address.clone())
                                                     .parse()
                                                     .unwrap();
-                                            let mut to_addr_vec =
-                                                next_hop_address.to_bytes().to_vec();
-                                            let to_addr =
-                                                match to_addr_vec.iter().rposition(|&b| b != 0u8) {
-                                                    Some(len) => {
-                                                        to_addr_vec.truncate(len + 1);
-                                                        String::from_utf8(to_addr_vec).unwrap()
-                                                    }
-                                                    None => String::from_utf8(to_addr_vec).unwrap(),
-                                                };
                                             let to: LettreMailbox = to_addr.parse().unwrap();
-                                            let body =
-                                                BASE64_STANDARD.encode(next_hop_packet.to_bytes());
-                                            println!("Forwarding packet to: {}", to);
+                                            println!("Forwarding payload to: {}", to);
                                             let email = LettreMessage::builder()
                                                 .from(from)
                                                 .to(to)
                                                 .subject("shallot")
                                                 .header(LettreContentType::TEXT_PLAIN)
-                                                .body(body)
+                                                .body(payload_b64)
                                                 .unwrap();
-                                            sleep(delay.to_duration()).await;
                                             mailer.send(&email).unwrap();
                                         }
-                                        ProcessedPacketData::FinalHop {
-                                            destination,
-                                            identifier,
-                                            payload,
-                                        } => {
-                                            println!(
-                                                "This is the final encrypted hop of the payload"
-                                            );
-                                            let mut to_addr_vec = destination.as_bytes().to_vec();
-                                            let to_addr =
-                                                match to_addr_vec.iter().rposition(|&b| b != 0u8) {
-                                                    Some(len) => {
-                                                        to_addr_vec.truncate(len + 1);
-                                                        String::from_utf8(to_addr_vec).unwrap()
-                                                    }
-                                                    None => String::from_utf8(to_addr_vec).unwrap(),
-                                                };
-                                            let payload_b64 = payload.recover_plaintext().unwrap();
-                                            if to_addr == email_address.clone() {
-                                                println!("This inbox is the final destination of the payload");
-                                                let payload_decoded =
-                                                    BASE64_STANDARD.decode(payload_b64).unwrap();
-                                                let payload_string =
-                                                    String::from_utf8(payload_decoded).unwrap();
-                                                println!("Payload: {}", payload_string);
-                                            } else {
-                                                println!("WARNING: This inbox is not the final destination of the payload, payload must be forwarded in plaintext");
-                                                let from: LettreMailbox =
-                                                    format!("{} <{}>", name, email_address.clone())
-                                                        .parse()
-                                                        .unwrap();
-                                                let to: LettreMailbox = to_addr.parse().unwrap();
-                                                println!("Forwarding payload to: {}", to);
-                                                let email = LettreMessage::builder()
-                                                    .from(from)
-                                                    .to(to)
-                                                    .subject("shallot")
-                                                    .header(LettreContentType::TEXT_PLAIN)
-                                                    .body(payload_b64)
-                                                    .unwrap();
-                                                mailer.send(&email).unwrap();
-                                            }
-                                        }
-                                    };
-                                }
+                                    }
+                                };
                             } else {
                                 println!("Did not recognize message type");
                             }
@@ -471,15 +452,15 @@ async fn main() {
                         let client =
                             imap::connect((imap_domain.as_str(), 993), imap_domain.as_str(), &tls)
                                 .unwrap();
-                        imap_session = match config.auth.r#type {
-                            AuthType::OAuth2 => {
+                        imap_session = match email_auth {
+                            AuthConfig::OAuth2 { .. } => {
                                 let gmail_auth = ImapOauth2 {
                                     user: email_address.clone(),
                                     access_token: password.clone(),
                                 };
                                 client.authenticate("XOAUTH2", &gmail_auth).unwrap()
                             }
-                            AuthType::Password => client
+                            AuthConfig::Password { .. } => client
                                 .login(email_address.as_str(), password.as_str())
                                 .unwrap(),
                         };
@@ -590,15 +571,9 @@ fn send_email(
         let route = route_addrs
             .iter()
             .filter_map(|addr| {
-                if let Some(entry) = address_book.get(addr.as_str()) {
-                    if let PublicKey::Dalek(pk) = entry.public_key {
-                        Some((addr.to_string(), pk))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+                address_book
+                    .get(addr.as_str())
+                    .map(|entry| (addr.to_string(), entry.public_key))
             })
             .collect();
         build_sphinx_packet(sender_addr, destination_addr, route)

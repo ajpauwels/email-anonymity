@@ -1,0 +1,34 @@
+# Any config value can be overriden by env using the following format:
+# APPCFG_PATH_TO_VALUE="<value>"
+#
+# For example, setting APPCFG_IDENTITY_SECRETKEY="<base64-encoded string>"
+# will override whatever is in the file and allows separation of secret
+# config from non-secret config
+
+email:                        # email server configuration
+  auth:                         # authentication details
+    type: ""                      # "oauth2" or "password"
+    password: ""                  # PASSWORD: app password if type is "password"
+    clientid: ""                  # OAUTH2: client id string
+    clientsecret: ""              # OAUTH2: client secret string
+    accesstokenoverride: ""       # OAUTH2: access token string to skip login
+    authurl: ""                   # OAUTH2: url to direct browser to
+    tokenurl: ""                  # OAUTH2: url to fetch token from after browser login
+    revocationurl: ""             # OAUTH2: revocation url for revoking tokens
+    redirecturl: ""               # OAUTH2: localhost url, eg "http://localhost:1000/redirect"
+  smtp:                         # smtp server details
+    address: ""                   # any smtp address
+  imap:                         # imap server details
+    address: ""                   # any imap address
+    keepalive: ""                 # keepalive interval eg. "29m" if prefer idling (default: 29m)
+    poll: ""                      # polling interval eg. "5s" if prefer polling (default: none)
+  mailboxes: []                 # array of imap paths to watch
+  # - "INBOX"                     # one example of a common imap path to watch
+identity:                     # inbox's identity details
+  address: ""                   # email address eg. name@domain.com
+  name: ""                      # name or pseudonym eg. John Doe
+  secretkey: ""                 # base64-encoded x25519 secret key
+addressbook: []               # address book of contactable users
+# - address: ""                 # email address
+#   name: ""                    # name or pseudonym
+#   publickey: ""               # base64-encoded x25519 public key

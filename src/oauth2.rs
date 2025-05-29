@@ -8,11 +8,11 @@ use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
     Scope, TokenUrl,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt::Display;
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Serialize)]
 pub struct OAuth2Config {
     #[serde(rename = "clientid")]
     pub client_id: String,
