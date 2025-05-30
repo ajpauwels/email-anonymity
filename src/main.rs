@@ -148,12 +148,13 @@ struct Oauth2Redirect {
 
 #[derive(Deserialize, Serialize)]
 struct Payload {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     #[serde(
         default,
         serialize_with = "surb_as_base64_option",
-        deserialize_with = "surb_from_base64_option"
+        deserialize_with = "surb_from_base64_option",
+        skip_serializing_if = "Option::is_none"
     )]
     surb: Option<SURB>,
 }
