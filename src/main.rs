@@ -519,6 +519,7 @@ fn build_sphinx_packet(
         surb: if send_surb {
             // Define SURB route as reverse of forward route
             let mut reverse_route = forward_route.clone();
+            reverse_route.pop();
             reverse_route.reverse();
             reverse_route.push(Node::new(
                 NodeAddressBytes::from_bytes(sender.address.as_bytes()),
@@ -618,8 +619,12 @@ fn use_surb(
     message: &str,
     mailer: &SmtpTransport,
 ) {
-    let message_b64 = BASE64_STANDARD.encode(message.as_bytes());
-    match surb.use_surb(message_b64.as_bytes(), 1024) {
+    let payload = Payload {
+        message: Some(message.to_owned()),
+        surb: None,
+    };
+    let payload_b64 = BASE64_STANDARD.encode(serde_yaml::to_string(&payload).unwrap());
+    match surb.use_surb(payload_b64.as_bytes(), 1024) {
         Ok((packet, next_hop_address)) => {
             let packet_b64 = BASE64_STANDARD.encode(packet.to_bytes());
 
