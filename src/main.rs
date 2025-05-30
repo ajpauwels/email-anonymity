@@ -1,18 +1,11 @@
 use std::borrow::Cow;
-use std::error::Error as StdError;
 use std::{collections::HashMap, time::Duration};
 
 use ::oauth2::{AuthorizationCode, CsrfToken, TokenResponse};
 use base64::prelude::*;
 use config::{Config, ConfigError};
 use lettre::{
-    message::{
-        header::{
-            ContentType as LettreContentType, Header as LettreHeader,
-            HeaderName as LettreHeaderName, HeaderValue as LettreHeaderValue,
-        },
-        Mailbox as LettreMailbox,
-    },
+    message::{header::ContentType as LettreContentType, Mailbox as LettreMailbox},
     transport::smtp::authentication::{
         Credentials as LettreCredentials, Mechanism as LettreMechanism,
     },
@@ -31,8 +24,8 @@ use x25519_dalek::{PublicKey as PublicKeyDalek, StaticSecret as StaticSecretDale
 
 mod deserialization;
 use deserialization::{
-    as_base64, as_base64_option, as_durationstring_option, string_is_duration_option,
-    string_is_ecc_public_key_dalek, string_is_ecc_secret_key_dalek_option,
+    as_base64, as_base64_option, as_durationstring_option, duration_from_durationstring_option,
+    surb_as_base64_option, surb_from_base64_option, u8_32_from_base64, u8_32_from_base64_option,
 };
 mod oauth2;
 
@@ -47,13 +40,13 @@ struct ImapConfig {
     #[serde(
         default,
         serialize_with = "as_durationstring_option",
-        deserialize_with = "string_is_duration_option"
+        deserialize_with = "duration_from_durationstring_option"
     )]
     keepalive: Option<Duration>,
     #[serde(
         default,
         serialize_with = "as_durationstring_option",
-        deserialize_with = "string_is_duration_option"
+        deserialize_with = "duration_from_durationstring_option"
     )]
     poll: Option<Duration>,
 }
@@ -83,7 +76,7 @@ struct SecretIdentityConfig {
         default,
         rename = "secretkey",
         serialize_with = "as_base64_option",
-        deserialize_with = "string_is_ecc_secret_key_dalek_option"
+        deserialize_with = "u8_32_from_base64_option"
     )]
     secret_key: Option<StaticSecretDalek>,
 }
@@ -95,7 +88,7 @@ struct PublicIdentityConfig {
     #[serde(
         rename = "publickey",
         serialize_with = "as_base64",
-        deserialize_with = "string_is_ecc_public_key_dalek"
+        deserialize_with = "u8_32_from_base64"
     )]
     public_key: PublicKeyDalek,
 }
@@ -106,24 +99,6 @@ struct ShallotConfig {
     identity: SecretIdentityConfig,
     #[serde(rename = "addressbook")]
     address_book: Vec<PublicIdentityConfig>,
-}
-
-#[derive(Clone)]
-struct PublicKeyHeader {
-    key: String,
-}
-impl LettreHeader for PublicKeyHeader {
-    fn name() -> LettreHeaderName {
-        LettreHeaderName::new_from_ascii_str("X-Shallot-Public-Key")
-    }
-
-    fn parse(s: &str) -> Result<Self, Box<dyn StdError + Send + Sync>> {
-        Ok(PublicKeyHeader { key: s.to_owned() })
-    }
-
-    fn display(&self) -> LettreHeaderValue {
-        LettreHeaderValue::new(Self::name(), self.key.clone())
-    }
 }
 
 fn load_config(path: &str, prefix: &str) -> Result<ShallotConfig, ConfigError> {
@@ -169,6 +144,16 @@ impl imap::Authenticator for ImapOauth2 {
 struct Oauth2Redirect {
     code: AuthorizationCode,
     state: CsrfToken,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Payload {
+    message: Option<String>,
+    #[serde(
+        serialize_with = "surb_as_base64_option",
+        deserialize_with = "surb_from_base64_option"
+    )]
+    surb: Option<SURB>,
 }
 
 #[tokio::main]
@@ -264,6 +249,8 @@ async fn main() {
         &pk,
         &address_book,
         &mailer,
+        Some("XATTACKXATXDAWNX".to_string()),
+        true,
     );
 
     // Store our async handles in a vector
@@ -358,34 +345,40 @@ async fn main() {
                                     ProcessedPacketData::FinalHop {
                                         destination,
                                         identifier: _,
-                                        payload,
+                                        payload: payload_encrypted,
                                     } => {
                                         println!("This is the final encrypted hop of the payload");
                                         let to_addr = bytes_to_string_truncate_zeroes(
                                             destination.as_bytes_ref(),
                                         );
-                                        let payload_b64 = payload.recover_plaintext().unwrap();
+                                        let payload_b64 =
+                                            payload_encrypted.recover_plaintext().unwrap();
                                         if to_addr == email_address {
                                             // This message is for us
                                             println!("This inbox is the final destination of the payload");
                                             let payload_decoded =
                                                 BASE64_STANDARD.decode(payload_b64).unwrap();
-
-                                            if let Ok(surb) = SURB::from_bytes(&payload_decoded) {
-                                                // Message is a SURB, respond
-                                                println!("Payload is a SURB, responding");
-                                                use_surb(
-                                                    &name,
-                                                    &email_address,
-                                                    surb,
-                                                    "XATTACKXHASXBEGUNX",
-                                                    &mailer,
-                                                );
+                                            let payload_string =
+                                                String::from_utf8(payload_decoded).unwrap();
+                                            if let Ok(payload) =
+                                                serde_yaml::from_str::<Payload>(&payload_string)
+                                            {
+                                                if let Some(message) = payload.message {
+                                                    println!("Payload included the following message: {}", message);
+                                                }
+                                                if let Some(surb) = payload.surb {
+                                                    // Message is a SURB, respond
+                                                    println!("Payload included a SURB, responding, with \"XATTACKXHASXBEGUNX\"");
+                                                    use_surb(
+                                                        &name,
+                                                        &email_address,
+                                                        surb,
+                                                        "XATTACKXHASXBEGUNX",
+                                                        &mailer,
+                                                    );
+                                                }
                                             } else {
-                                                // Message is a string, display
-                                                let payload_string =
-                                                    String::from_utf8(payload_decoded).unwrap();
-                                                println!("Payload: {}", payload_string);
+                                                println!("Message is not a recognizable payload, raw payload is: {}", payload_string);
                                             }
                                         } else {
                                             // This message is not for
@@ -487,6 +480,8 @@ fn build_sphinx_packet(
     sender_tuple: (&str, &PublicKeyDalek),
     destination_tuple: (&str, &PublicKeyDalek),
     route: Vec<(&str, &PublicKeyDalek)>,
+    message: Option<String>,
+    send_surb: bool,
 ) -> String {
     // Define destination
     let destination = Destination::new(
@@ -511,40 +506,54 @@ fn build_sphinx_packet(
         })
         .collect();
 
-    // Define SURB route as reverse of forward route
-    let mut reverse_route = forward_route.clone();
-    reverse_route.reverse();
-
-    // Add last endpoint to each route
+    // Add destination as last endpoint of route so that it is also
+    // encrypted
     forward_route.push(Node::new(
         NodeAddressBytes::from_bytes(destination.address.as_bytes()),
         *destination_tuple.1,
     ));
-    reverse_route.push(Node::new(
-        NodeAddressBytes::from_bytes(sender.address.as_bytes()),
-        *sender_tuple.1,
-    ));
 
-    // Generate the SURB
-    let surb_initial_secret = StaticSecretDalek::random();
-    let surb_average_delay = Duration::from_secs(3);
-    let surb_delays =
-        delays::generate_from_average_duration(reverse_route.len(), surb_average_delay);
-    let surb = SURB::new(
-        surb_initial_secret,
-        SURBMaterial::new(reverse_route, surb_delays, sender),
-    )
-    .unwrap();
-    let surb_b64 = BASE64_STANDARD.encode(surb.to_bytes()).into_bytes();
-    println!("SURB is {} bytes long", surb_b64.len());
-    // let plain_b64 = BASE64_STANDARD
-    //     .encode("XATTACKXATXDAWNX".as_bytes())
-    //     .into_bytes();
+    // Create payload, including a SURB if requested
+    let payload = Payload {
+        message,
+        surb: if send_surb {
+            // Define SURB route as reverse of forward route
+            let mut reverse_route = forward_route.clone();
+            reverse_route.reverse();
+            reverse_route.push(Node::new(
+                NodeAddressBytes::from_bytes(sender.address.as_bytes()),
+                *sender_tuple.1,
+            ));
+
+            // Generate the SURB
+            let surb_initial_secret = StaticSecretDalek::random();
+            let surb_average_delay = Duration::from_secs(3);
+            let surb_delays =
+                delays::generate_from_average_duration(reverse_route.len(), surb_average_delay);
+            Some(
+                SURB::new(
+                    surb_initial_secret,
+                    SURBMaterial::new(reverse_route, surb_delays, sender),
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        },
+    };
+
+    // Encode the payload in base64
+    let payload_b64 = BASE64_STANDARD
+        .encode(serde_yaml::to_string(&payload).unwrap())
+        .into_bytes();
+
+    println!("Payload is {} bytes long", payload_b64.len());
 
     // Generate the Sphinx packet containing the SURB as payload
     let average_delay = Duration::from_secs(1);
     let delays = delays::generate_from_average_duration(forward_route.len(), average_delay);
-    let sphinx_packet = SphinxPacket::new(surb_b64, &forward_route, &destination, &delays).unwrap();
+    let sphinx_packet =
+        SphinxPacket::new(payload_b64, &forward_route, &destination, &delays).unwrap();
 
     BASE64_STANDARD.encode(sphinx_packet.to_bytes())
 }
@@ -555,6 +564,8 @@ fn send_email(
     sender_pk: &PublicKeyDalek,
     address_book: &HashMap<&str, &PublicIdentityConfig>,
     mailer: &SmtpTransport,
+    message: Option<String>,
+    send_surb: bool,
 ) {
     let route = ["johncamacuk@yahoo.com"]
         .into_iter()
@@ -572,6 +583,8 @@ fn send_email(
             (sender_addr, sender_pk),
             (destination_addr, &destination_pk),
             route,
+            message,
+            send_surb,
         )
     };
 

@@ -1,9 +1,12 @@
 use base64::prelude::*;
 use duration_string::DurationString;
+use sphinx_packet::SURB;
 use std::{fmt::Display, time::Duration};
 
-use serde::{de, Deserialize, Deserializer, Serializer};
-use x25519_dalek::{PublicKey as PublicKeyDalek, StaticSecret as StaticSecretDalek};
+use serde::{
+    de::{self},
+    Deserialize, Deserializer, Serializer,
+};
 
 pub fn empty_string_is_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
@@ -75,81 +78,41 @@ impl Display for DurationDeserializationError {
     }
 }
 
-// pub fn string_is_ecc_public_key_nacl<'de, D>(deserializer: D) -> Result<PublicKeyNaCl, D::Error>
-// where
-//     D: Deserializer<'de>,
-// {
-//     let key_string = String::deserialize(deserializer)?;
-//     if key_string.is_empty() {
-//         Err(de::Error::custom(CryptoDeserializationError::Empty))
-//     } else {
-//         let key_bytes = BASE64_STANDARD
-//             .decode(key_string)
-//             .map_err(|_| de::Error::custom(CryptoDeserializationError::InvalidBase64))?;
-//         let pk = PublicKeyNaCl::from_slice(key_bytes.as_ref())
-//             .ok_or(de::Error::custom(CryptoDeserializationError::BadLength))?;
-//         Ok(pk)
-//     }
-// }
-
-pub fn string_is_ecc_public_key_dalek<'de, D>(deserializer: D) -> Result<PublicKeyDalek, D::Error>
+pub fn u8_32_from_base64<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
+    T: From<[u8; 32]>,
     D: Deserializer<'de>,
 {
-    let key_string = String::deserialize(deserializer)?;
-    if key_string.is_empty() {
+    let s = String::deserialize(deserializer)?;
+    if s.is_empty() {
         Err(de::Error::custom(CryptoDeserializationError::Empty))
     } else {
-        let key_bytes = BASE64_STANDARD
-            .decode(key_string)
+        let b = BASE64_STANDARD
+            .decode(s)
             .map_err(|_| de::Error::custom(CryptoDeserializationError::InvalidBase64))?;
-        let key_bytes_array: [u8; 32] = key_bytes
+        let a: [u8; 32] = b
             .try_into()
             .map_err(|_| de::Error::custom(CryptoDeserializationError::BadLength))?;
-        let pk = PublicKeyDalek::from(key_bytes_array);
-        Ok(pk)
+        Ok(T::from(a))
     }
 }
 
-// pub fn string_is_ecc_secret_key_dalek<'de, D>(
-//     deserializer: D,
-// ) -> Result<StaticSecretDalek, D::Error>
-// where
-//     D: Deserializer<'de>,
-// {
-//     let key_string = String::deserialize(deserializer)?;
-//     if key_string.is_empty() {
-//         Err(de::Error::custom(CryptoDeserializationError::Empty))
-//     } else {
-//         let key_bytes = BASE64_STANDARD
-//             .decode(key_string)
-//             .map_err(|_| de::Error::custom(CryptoDeserializationError::InvalidBase64))?;
-//         let key_bytes_array: [u8; 32] = key_bytes
-//             .try_into()
-//             .map_err(|_| de::Error::custom(CryptoDeserializationError::BadLength))?;
-//         let sk = StaticSecretDalek::from(key_bytes_array);
-//         Ok(sk)
-//     }
-// }
-
-pub fn string_is_ecc_secret_key_dalek_option<'de, D>(
-    deserializer: D,
-) -> Result<Option<StaticSecretDalek>, D::Error>
+pub fn u8_32_from_base64_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
+    T: From<[u8; 32]>,
     D: Deserializer<'de>,
 {
-    let key_string = String::deserialize(deserializer)?;
-    if key_string.is_empty() {
+    let s = String::deserialize(deserializer)?;
+    if s.is_empty() {
         Ok(None)
     } else {
-        let key_bytes = BASE64_STANDARD
-            .decode(key_string)
+        let b = BASE64_STANDARD
+            .decode(s)
             .map_err(|_| de::Error::custom(CryptoDeserializationError::InvalidBase64))?;
-        let key_bytes_array: [u8; 32] = key_bytes
+        let a: [u8; 32] = b
             .try_into()
             .map_err(|_| de::Error::custom(CryptoDeserializationError::BadLength))?;
-        let sk = StaticSecretDalek::from(key_bytes_array);
-        Ok(Some(sk))
+        Ok(Some(T::from(a)))
     }
 }
 
@@ -172,7 +135,35 @@ where
     }
 }
 
-pub fn string_is_duration_option<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+pub fn surb_as_base64_option<S>(key: &Option<SURB>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match key {
+        Some(key) => serializer.serialize_str(&BASE64_STANDARD.encode(key.to_bytes())),
+        None => serializer.serialize_none(),
+    }
+}
+
+pub fn surb_from_base64_option<'de, D>(deserializer: D) -> Result<Option<SURB>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let string = String::deserialize(deserializer)?;
+    if string.is_empty() {
+        Ok(None)
+    } else {
+        let bytes = BASE64_STANDARD
+            .decode(string)
+            .map_err(|_| de::Error::custom(CryptoDeserializationError::InvalidBase64))?;
+        let surb = SURB::from_bytes(&bytes).map_err(de::Error::custom)?;
+        Ok(Some(surb))
+    }
+}
+
+pub fn duration_from_durationstring_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error>
 where
     D: Deserializer<'de>,
 {
