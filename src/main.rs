@@ -456,40 +456,22 @@ async fn main() {
                         imap_session.select(&mailbox).unwrap();
                     }
                     (None, Some(keepalive)) => {
+                        // Set custom keepalive and wait for mailbox size to change
                         let mut idle_handle = imap_session.idle();
                         idle_handle.timeout(keepalive);
-                        match idle_handle.wait_while(|_| false) {
-                            Ok(reason) => {
-                                match reason {
-                                    imap::extensions::idle::WaitOutcome::TimedOut => {
-                                        println!("Mailbox listen timed out, restarting")
-                                    }
-                                    imap::extensions::idle::WaitOutcome::MailboxChanged => {
-                                        println!("Mailbox change detected")
-                                    }
-                                };
-                            }
-                            Err(e) => {
-                                println!("Mailbox listen encountered an error, restarting: {}", e)
-                            }
+                        if let Err(e) = idle_handle.wait_while(|reason| {
+                            !matches!(reason, imap::types::UnsolicitedResponse::Exists(_))
+                        }) {
+                            println!("Mailbox listen encountered an error, restarting: {}", e);
                         };
                     }
                     (None, None) => {
+                        // Use default keepalive of 29m and wait for mailbox size to change
                         let mut idle_handle = imap_session.idle();
-                        match idle_handle.wait_while(|_| false) {
-                            Ok(reason) => {
-                                match reason {
-                                    imap::extensions::idle::WaitOutcome::TimedOut => {
-                                        println!("Mailbox listen timed out, restarting")
-                                    }
-                                    imap::extensions::idle::WaitOutcome::MailboxChanged => {
-                                        println!("Mailbox change detected")
-                                    }
-                                };
-                            }
-                            Err(e) => {
-                                println!("Mailbox listen encountered an error, restarting: {}", e)
-                            }
+                        if let Err(e) = idle_handle.wait_while(|reason| {
+                            !matches!(reason, imap::types::UnsolicitedResponse::Exists(_))
+                        }) {
+                            println!("Mailbox listen encountered an error, restarting: {}", e);
                         };
                     }
                 }
