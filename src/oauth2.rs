@@ -95,8 +95,9 @@ where
 }
 
 pub fn begin_oauth2_flow(
-    config: OAuth2Config,
+    config: &OAuth2Config,
 ) -> Result<(PkceCodeVerifier, CsrfToken), OAuth2Error> {
+    let config = config.clone();
     let client = BasicClient::new(ClientId::new(config.client_id))
         .set_client_secret(ClientSecret::new(config.client_secret))
         .set_auth_uri(AuthUrl::new(config.auth_url)?)
@@ -123,10 +124,11 @@ pub fn begin_oauth2_flow(
 }
 
 pub async fn complete_oauth2_flow(
-    config: OAuth2Config,
+    config: &OAuth2Config,
     pkce_verifier: PkceCodeVerifier,
     auth_code: AuthorizationCode,
 ) -> Result<impl TokenResponse, OAuth2Error> {
+    let config = config.clone();
     let client = BasicClient::new(ClientId::new(config.client_id))
         .set_client_secret(ClientSecret::new(config.client_secret))
         .set_auth_uri(AuthUrl::new(config.auth_url)?)

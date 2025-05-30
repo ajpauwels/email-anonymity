@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::error::Error as StdError;
 use std::{collections::HashMap, time::Duration};
 
@@ -20,7 +21,6 @@ use lettre::{
 use mail_parser::MessageParser;
 use oauth2::OAuth2Config;
 use serde::{Deserialize, Serialize};
-use sodiumoxide::crypto::box_::{self};
 use sphinx_packet::header::delays;
 use sphinx_packet::route::{Destination, DestinationAddressBytes, Node, NodeAddressBytes};
 use sphinx_packet::{ProcessedPacketData, SURBMaterial, SphinxPacket, SURB};
@@ -171,66 +171,34 @@ struct Oauth2Redirect {
     state: CsrfToken,
 }
 
-enum CryptoLibrary {
-    NaCl,
-    Dalek,
-}
-
-impl std::fmt::Display for CryptoLibrary {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NaCl => f.write_str("nacl"),
-            Self::Dalek => f.write_str("dalek"),
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() {
-    // Set our default crypto library
-    let default_crypto_lib = CryptoLibrary::Dalek;
-
     // Get app config
     let config_path = "./config";
     let config = load_config(config_path, "APPCFG").unwrap();
 
     // Generate keys if they don't exist
-    let (_, pk_b64, sk, sk_b64) = match default_crypto_lib {
-        CryptoLibrary::NaCl => {
-            let (_, sk_nacl) = box_::gen_keypair();
-            let sk = StaticSecretDalek::from(sk_nacl.0);
-            let pk = PublicKeyDalek::from(&sk);
-            let pk_b64 = BASE64_STANDARD.encode(pk);
-            let sk_b64 = BASE64_STANDARD.encode(&sk);
-            (pk, pk_b64, sk, sk_b64)
-        }
-        CryptoLibrary::Dalek => {
-            let sk = StaticSecretDalek::random();
-            let pk = PublicKeyDalek::from(&sk);
-            let pk_b64 = BASE64_STANDARD.encode(pk);
-            let sk_b64 = BASE64_STANDARD.encode(&sk);
-            (pk, pk_b64, sk, sk_b64)
-        }
-    };
-    let sk = match config.identity.secret_key {
-        Some(ref sk) => sk,
+    let sk = StaticSecretDalek::random();
+    let (sk, pk) = match config.identity.secret_key {
+        Some(ref sk) => (sk, PublicKeyDalek::from(sk)),
         None => {
-            println!("Generated new key material using {}", default_crypto_lib);
+            let pk = PublicKeyDalek::from(&sk);
+            let sk_b64 = BASE64_STANDARD.encode(&sk);
+            let pk_b64 = BASE64_STANDARD.encode(pk);
             println!("Generated secret key: {}", sk_b64);
             println!("Generated public key: {}", pk_b64);
             println!(
-                "To persist, set the environment variable APPCFG_IDENTITY_SECRETKEY_{}=\"{}\"",
-                default_crypto_lib.to_string().to_uppercase(),
+                "To persist, set the environment variable APPCFG_IDENTITY_SECRETKEY=\"{}\"",
                 sk_b64,
             );
-            &sk
+            (&sk, pk)
         }
     };
-    let pk = PublicKeyDalek::from(sk);
 
     // Generate the address book hashmap
-    let address_book = build_address_book(config.address_book.as_ref());
+    let address_book = build_address_book(&config.address_book);
 
+    // Fetch token for authenticating to IMAP and SMTP servers
     let (password, smtp_auth_mechanism) = match config.email.auth {
         AuthConfig::OAuth2(ref oauth2) => {
             // Build oauth2 redirect listener
@@ -246,8 +214,7 @@ async fn main() {
                         Server::http(format!("{}:{}", redirect_host, redirect_port)).unwrap();
 
                     // Begin oauth2 flow
-                    let (pkce_verifier, csrf_token) =
-                        oauth2::begin_oauth2_flow(oauth2.clone()).unwrap();
+                    let (pkce_verifier, csrf_token) = oauth2::begin_oauth2_flow(oauth2).unwrap();
 
                     // Receive oauth2 redirection
                     let redirect_request = server.recv().unwrap();
@@ -266,7 +233,7 @@ async fn main() {
 
                     // Exchange authorization code for tokens
                     let token_response = oauth2::complete_oauth2_flow(
-                        oauth2.clone(),
+                        oauth2,
                         pkce_verifier,
                         oauth2_redirect_params.code,
                     )
@@ -284,7 +251,7 @@ async fn main() {
 
     // Login to SMTP
     let smtp_creds = LettreCredentials::new(config.identity.address.clone(), password.clone());
-    let mailer = SmtpTransport::relay(config.email.smtp.address.as_str())
+    let mailer = SmtpTransport::relay(&config.email.smtp.address)
         .unwrap()
         .credentials(smtp_creds)
         .authentication(vec![smtp_auth_mechanism])
@@ -292,9 +259,9 @@ async fn main() {
 
     // Uncomment to send an email
     send_email(
-        config.identity.name.clone(),
-        config.identity.address.clone(),
-        pk,
+        &config.identity.name,
+        &config.identity.address,
+        &pk,
         &address_book,
         &mailer,
     );
@@ -302,7 +269,10 @@ async fn main() {
     // Store our async handles in a vector
     let mut handles = vec![];
 
+    // Create an async listener for each mailbox
     for mailbox in config.email.mailboxes.iter() {
+        // We have to clone everything we're sending into the async
+        // thread
         let mailbox = mailbox.clone();
         let email_address = config.identity.address.clone();
         let name = config.identity.name.clone();
@@ -314,11 +284,12 @@ async fn main() {
         let idle_keepalive = config.email.imap.keepalive;
         let poll_interval = config.email.imap.poll;
 
+        // Create the listener thread
         let listener = tokio::spawn(async move {
             // Log in to IMAP
-            let tls = native_tls::TlsConnector::builder().build().unwrap();
-            let client =
-                imap::connect((imap_domain.as_str(), 993), imap_domain.as_str(), &tls).unwrap();
+            let client = imap::ClientBuilder::new(&imap_domain, 993)
+                .connect()
+                .unwrap();
             let mut imap_session = match email_auth {
                 AuthConfig::OAuth2 { .. } => {
                     let gmail_auth = ImapOauth2 {
@@ -327,9 +298,7 @@ async fn main() {
                     };
                     client.authenticate("XOAUTH2", &gmail_auth).unwrap()
                 }
-                AuthConfig::Password { .. } => client
-                    .login(email_address.as_str(), password.as_str())
-                    .unwrap(),
+                AuthConfig::Password { .. } => client.login(&email_address, &password).unwrap(),
             };
 
             // Select our mailbox
@@ -337,19 +306,23 @@ async fn main() {
 
             println!("Beginning to listen on IMAP mailbox {}", &mailbox);
 
-            // Process shallot messages as they arrive
+            // Main polling/idle loop
             loop {
+                // Fetch and iterate over unseen messages
                 let search_response = imap_session.search("NOT SEEN SUBJECT \"shallot\"").unwrap();
                 for uid in search_response.iter() {
                     let fetches = imap_session.fetch(uid.to_string(), "BODY[]").unwrap();
                     if let Some(f) = fetches.iter().next() {
                         if let Some(b) = f.body() {
+                            // Extract and decode fetched message body
                             let message = MessageParser::default().parse(b).unwrap();
                             let body_b64 = message.body_text(0).unwrap();
                             let body = BASE64_STANDARD.decode(body_b64.trim()).unwrap();
 
+                            // Deserialize body into a Sphinx packet
                             if let Ok(packet) = SphinxPacket::from_bytes(&body) {
                                 match packet.process(&sk).unwrap().data {
+                                    // Forward a packet to next hop
                                     ProcessedPacketData::ForwardHop {
                                         next_hop_packet,
                                         next_hop_address,
@@ -362,15 +335,9 @@ async fn main() {
                                             format!("{} <{}>", &name, &email_address)
                                                 .parse()
                                                 .unwrap();
-                                        let mut to_addr_vec = next_hop_address.to_bytes().to_vec();
-                                        let to_addr =
-                                            match to_addr_vec.iter().rposition(|&b| b != 0u8) {
-                                                Some(len) => {
-                                                    to_addr_vec.truncate(len + 1);
-                                                    String::from_utf8(to_addr_vec).unwrap()
-                                                }
-                                                None => String::from_utf8(to_addr_vec).unwrap(),
-                                            };
+                                        let to_addr = bytes_to_string_truncate_zeroes(
+                                            next_hop_address.as_bytes(),
+                                        );
                                         let to: LettreMailbox = to_addr.parse().unwrap();
                                         let body =
                                             BASE64_STANDARD.encode(next_hop_packet.to_bytes());
@@ -385,28 +352,27 @@ async fn main() {
                                         sleep(delay.to_duration()).await;
                                         mailer.send(&email).unwrap();
                                     }
+                                    // Either display final message or
+                                    // forward plaintext message to
+                                    // next hop
                                     ProcessedPacketData::FinalHop {
                                         destination,
-                                        identifier,
+                                        identifier: _,
                                         payload,
                                     } => {
                                         println!("This is the final encrypted hop of the payload");
-                                        let mut to_addr_vec = destination.as_bytes().to_vec();
-                                        let to_addr =
-                                            match to_addr_vec.iter().rposition(|&b| b != 0u8) {
-                                                Some(len) => {
-                                                    to_addr_vec.truncate(len + 1);
-                                                    String::from_utf8(to_addr_vec).unwrap()
-                                                }
-                                                None => String::from_utf8(to_addr_vec).unwrap(),
-                                            };
+                                        let to_addr = bytes_to_string_truncate_zeroes(
+                                            destination.as_bytes_ref(),
+                                        );
                                         let payload_b64 = payload.recover_plaintext().unwrap();
-                                        if to_addr == email_address.clone() {
+                                        if to_addr == email_address {
+                                            // This message is for us
                                             println!("This inbox is the final destination of the payload");
                                             let payload_decoded =
                                                 BASE64_STANDARD.decode(payload_b64).unwrap();
 
                                             if let Ok(surb) = SURB::from_bytes(&payload_decoded) {
+                                                // Message is a SURB, respond
                                                 println!("Payload is a SURB, responding");
                                                 use_surb(
                                                     &name,
@@ -416,11 +382,16 @@ async fn main() {
                                                     &mailer,
                                                 );
                                             } else {
+                                                // Message is a string, display
                                                 let payload_string =
                                                     String::from_utf8(payload_decoded).unwrap();
                                                 println!("Payload: {}", payload_string);
                                             }
                                         } else {
+                                            // This message is not for
+                                            // us, forward to final
+                                            // destination in
+                                            // plaintext
                                             println!("WARNING: This inbox is not the final destination of the payload, payload must be forwarded in plaintext");
                                             let from: LettreMailbox =
                                                 format!("{} <{}>", &name, &email_address)
@@ -464,10 +435,10 @@ async fn main() {
                         sleep(interval).await;
 
                         // Log in to IMAP again
-                        let tls = native_tls::TlsConnector::builder().build().unwrap();
-                        let client =
-                            imap::connect((imap_domain.as_str(), 993), imap_domain.as_str(), &tls)
-                                .unwrap();
+                        let client = imap::ClientBuilder::new(&imap_domain, 993)
+                            .connect()
+                            .unwrap();
+
                         imap_session = match email_auth {
                             AuthConfig::OAuth2 { .. } => {
                                 let gmail_auth = ImapOauth2 {
@@ -485,13 +456,41 @@ async fn main() {
                         imap_session.select(&mailbox).unwrap();
                     }
                     (None, Some(keepalive)) => {
-                        let mut idle_handle = imap_session.idle().unwrap();
-                        idle_handle.set_keepalive(keepalive);
-                        idle_handle.wait_keepalive().unwrap();
+                        let mut idle_handle = imap_session.idle();
+                        idle_handle.timeout(keepalive);
+                        match idle_handle.wait_while(|_| false) {
+                            Ok(reason) => {
+                                match reason {
+                                    imap::extensions::idle::WaitOutcome::TimedOut => {
+                                        println!("Mailbox listen timed out, restarting")
+                                    }
+                                    imap::extensions::idle::WaitOutcome::MailboxChanged => {
+                                        println!("Mailbox change detected")
+                                    }
+                                };
+                            }
+                            Err(e) => {
+                                println!("Mailbox listen encountered an error, restarting: {}", e)
+                            }
+                        };
                     }
                     (None, None) => {
-                        let idle_handle = imap_session.idle().unwrap();
-                        idle_handle.wait_keepalive().unwrap();
+                        let mut idle_handle = imap_session.idle();
+                        match idle_handle.wait_while(|_| false) {
+                            Ok(reason) => {
+                                match reason {
+                                    imap::extensions::idle::WaitOutcome::TimedOut => {
+                                        println!("Mailbox listen timed out, restarting")
+                                    }
+                                    imap::extensions::idle::WaitOutcome::MailboxChanged => {
+                                        println!("Mailbox change detected")
+                                    }
+                                };
+                            }
+                            Err(e) => {
+                                println!("Mailbox listen encountered an error, restarting: {}", e)
+                            }
+                        };
                     }
                 }
             }
@@ -502,34 +501,20 @@ async fn main() {
     futures::future::join_all(handles).await;
 }
 
-// Takes a string and converts it to an array of 32-bytes, panicking
-// if the string is too long, and filling the rest of the array with
-// zeros if it's too short
-fn string_to_byte_array_32(s: String) -> [u8; 32] {
-    if s.len() > 32 {
-        panic!("String \"{}\" is longer than 32 character", s);
-    } else {
-        let s_bytes = s.into_bytes();
-        let mut v = [0u8; 32];
-        v[..s_bytes.len()].copy_from_slice(&s_bytes[..]);
-        v
-    }
-}
-
 fn build_sphinx_packet(
-    sender_tuple: (String, PublicKeyDalek),
-    destination_tuple: (String, PublicKeyDalek),
-    route: Vec<(String, PublicKeyDalek)>,
+    sender_tuple: (&str, &PublicKeyDalek),
+    destination_tuple: (&str, &PublicKeyDalek),
+    route: Vec<(&str, &PublicKeyDalek)>,
 ) -> String {
     // Define destination
     let destination = Destination::new(
-        DestinationAddressBytes::from_bytes(string_to_byte_array_32(destination_tuple.0)),
+        DestinationAddressBytes::from_bytes(str_to_byte_array_32(destination_tuple.0)),
         [0u8; 16],
     );
 
     // Define sender
     let sender = Destination::new(
-        DestinationAddressBytes::from_bytes(string_to_byte_array_32(sender_tuple.0.clone())),
+        DestinationAddressBytes::from_bytes(str_to_byte_array_32(sender_tuple.0)),
         [1u8; 16],
     );
 
@@ -538,8 +523,8 @@ fn build_sphinx_packet(
         .into_iter()
         .map(|(addr, pk)| {
             Node::new(
-                NodeAddressBytes::from_bytes(string_to_byte_array_32(addr)),
-                pk,
+                NodeAddressBytes::from_bytes(str_to_byte_array_32(addr)),
+                *pk,
             )
         })
         .collect();
@@ -551,11 +536,11 @@ fn build_sphinx_packet(
     // Add last endpoint to each route
     forward_route.push(Node::new(
         NodeAddressBytes::from_bytes(destination.address.as_bytes()),
-        destination_tuple.1,
+        *destination_tuple.1,
     ));
     reverse_route.push(Node::new(
         NodeAddressBytes::from_bytes(sender.address.as_bytes()),
-        sender_tuple.1,
+        *sender_tuple.1,
     ));
 
     // Generate the SURB
@@ -570,9 +555,9 @@ fn build_sphinx_packet(
     .unwrap();
     let surb_b64 = BASE64_STANDARD.encode(surb.to_bytes()).into_bytes();
     println!("SURB is {} bytes long", surb_b64.len());
-    let plain_b64 = BASE64_STANDARD
-        .encode("XATTACKXATXDAWNX".as_bytes())
-        .into_bytes();
+    // let plain_b64 = BASE64_STANDARD
+    //     .encode("XATTACKXATXDAWNX".as_bytes())
+    //     .into_bytes();
 
     // Generate the Sphinx packet containing the SURB as payload
     let average_delay = Duration::from_secs(1);
@@ -583,31 +568,27 @@ fn build_sphinx_packet(
 }
 
 fn send_email(
-    sender_name: String,
-    sender_addr: String,
-    sender_pk: PublicKeyDalek,
-    address_book: &HashMap<String, &PublicIdentityConfig>,
+    sender_name: &str,
+    sender_addr: &str,
+    sender_pk: &PublicKeyDalek,
+    address_book: &HashMap<&str, &PublicIdentityConfig>,
     mailer: &SmtpTransport,
 ) {
-    let route_addrs = ["johncamacuk@yahoo.com".to_string()];
-    let destination_addr = "johncamacuk@gmail.com".to_string();
-    let destination_pk = address_book
-        .get(destination_addr.as_str())
-        .unwrap()
-        .public_key;
+    let route = ["johncamacuk@yahoo.com"]
+        .into_iter()
+        .filter_map(|addr| {
+            address_book
+                .get(addr)
+                .map(|entry| (addr, &entry.public_key))
+        })
+        .collect();
+    let destination_addr = "johncamacuk@gmail.com";
+    let destination_pk = address_book.get(destination_addr).unwrap().public_key;
 
     let packet = {
-        let route = route_addrs
-            .iter()
-            .filter_map(|addr| {
-                address_book
-                    .get(addr.as_str())
-                    .map(|entry| (addr.to_string(), entry.public_key))
-            })
-            .collect();
         build_sphinx_packet(
-            (sender_addr.clone(), sender_pk),
-            (destination_addr, destination_pk),
+            (sender_addr, sender_pk),
+            (destination_addr, &destination_pk),
             route,
         )
     };
@@ -620,8 +601,8 @@ fn send_email(
         .parse()
         .unwrap();
     let email = LettreMessage::builder()
-        .from(from.clone())
-        .to(to.clone())
+        .from(from)
+        .to(to)
         .subject("shallot")
         .header(LettreContentType::TEXT_PLAIN)
         .body(packet)
@@ -632,6 +613,9 @@ fn send_email(
     println!("Message sent");
 }
 
+// Takes a received SURB, the sender's information, a message to reply
+// with, and an SMTP client to consume the SURB and anonymously
+// respond
 fn use_surb(
     from_name: &str,
     from_address: &str,
@@ -646,18 +630,11 @@ fn use_surb(
 
             // Construct email
             let from: LettreMailbox = format!("{} <{}>", from_name, from_address).parse().unwrap();
-            let mut to_addr_vec = next_hop_address.to_bytes().to_vec();
-            let to_addr = match to_addr_vec.iter().rposition(|&b| b != 0u8) {
-                Some(len) => {
-                    to_addr_vec.truncate(len + 1);
-                    String::from_utf8(to_addr_vec).unwrap()
-                }
-                None => String::from_utf8(to_addr_vec).unwrap(),
-            };
+            let to_addr = bytes_to_string_truncate_zeroes(next_hop_address.as_bytes());
             let to: LettreMailbox = to_addr.parse().unwrap();
             let email = LettreMessage::builder()
-                .from(from.clone())
-                .to(to.clone())
+                .from(from)
+                .to(to)
                 .subject("shallot")
                 .header(LettreContentType::TEXT_PLAIN)
                 .body(packet_b64)
@@ -671,12 +648,38 @@ fn use_surb(
     };
 }
 
-fn build_address_book(
-    addresses: &[PublicIdentityConfig],
-) -> HashMap<String, &PublicIdentityConfig> {
+// Takes a slice of PublicIdentityConfig structs and builds a HashMap
+// mapping email addresses to their corresponding config
+fn build_address_book(addresses: &[PublicIdentityConfig]) -> HashMap<&str, &PublicIdentityConfig> {
     let mut hm = HashMap::new();
     for address in addresses.iter() {
-        hm.insert(address.address.clone(), address);
+        hm.insert(address.address.as_str(), address);
     }
     hm
+}
+
+// Takes a string and converts it to an array of 32-bytes, panicking
+// if the string is too long, and filling the rest of the array with
+// zeros if it's too short
+fn str_to_byte_array_32(s: &str) -> [u8; 32] {
+    if s.len() > 32 {
+        panic!("String \"{}\" is longer than 32 characters", s);
+    } else {
+        let s_bytes = s.as_bytes();
+        let mut v = [0u8; 32];
+        v[..s_bytes.len()].copy_from_slice(s_bytes);
+        v
+    }
+}
+
+// Accepts a slice of bytes, removes all trailing zero-bytes, and
+// converts the remaining prefix into a string
+//
+// WARNING: Invalid UTF-8 characters in the prefix will be replaced
+// with the U+FFFD (�) character
+fn bytes_to_string_truncate_zeroes(bytes: &[u8]) -> Cow<'_, str> {
+    match bytes.iter().rposition(|&b| b != 0u8) {
+        Some(len) => String::from_utf8_lossy(&bytes[0..len + 1]),
+        None => String::from_utf8_lossy(bytes),
+    }
 }
