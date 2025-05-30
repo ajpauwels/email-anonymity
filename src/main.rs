@@ -148,8 +148,10 @@ struct Oauth2Redirect {
 
 #[derive(Deserialize, Serialize)]
 struct Payload {
+    #[serde(default)]
     message: Option<String>,
     #[serde(
+        default,
         serialize_with = "surb_as_base64_option",
         deserialize_with = "surb_from_base64_option"
     )]
@@ -351,15 +353,19 @@ async fn main() {
                                         let to_addr = bytes_to_string_truncate_zeroes(
                                             destination.as_bytes_ref(),
                                         );
-                                        let payload_b64 =
+                                        // let payload_b64 =
+                                        //     payload_encrypted.recover_plaintext().unwrap();
+                                        let payload_bytes =
                                             payload_encrypted.recover_plaintext().unwrap();
                                         if to_addr == email_address {
                                             // This message is for us
                                             println!("This inbox is the final destination of the payload");
-                                            let payload_decoded =
-                                                BASE64_STANDARD.decode(payload_b64).unwrap();
+                                            // let payload_decoded =
+                                            //     BASE64_STANDARD.decode(payload_b64).unwrap();
+                                            // let payload_string =
+                                            //     String::from_utf8(payload_decoded).unwrap();
                                             let payload_string =
-                                                String::from_utf8(payload_decoded).unwrap();
+                                                String::from_utf8(payload_bytes).unwrap();
                                             if let Ok(payload) =
                                                 serde_yaml::from_str::<Payload>(&payload_string)
                                             {
@@ -397,7 +403,7 @@ async fn main() {
                                                 .to(to)
                                                 .subject("shallot")
                                                 .header(LettreContentType::TEXT_PLAIN)
-                                                .body(payload_b64)
+                                                .body(payload_bytes)
                                                 .unwrap();
                                             mailer.send(&email).unwrap();
                                         }
@@ -544,17 +550,18 @@ fn build_sphinx_packet(
     };
 
     // Encode the payload in base64
-    let payload_b64 = BASE64_STANDARD
-        .encode(serde_yaml::to_string(&payload).unwrap())
-        .into_bytes();
+    // let payload_b64 = BASE64_STANDARD
+    //     .encode(serde_yaml::to_string(&payload).unwrap())
+    //     .into_bytes();
+    let payload_bytes = serde_yaml::to_string(&payload).unwrap().into_bytes();
 
-    println!("Payload is {} bytes long", payload_b64.len());
+    println!("Payload is {} bytes long", payload_bytes.len());
 
     // Generate the Sphinx packet containing the SURB as payload
     let average_delay = Duration::from_secs(1);
     let delays = delays::generate_from_average_duration(forward_route.len(), average_delay);
     let sphinx_packet =
-        SphinxPacket::new(payload_b64, &forward_route, &destination, &delays).unwrap();
+        SphinxPacket::new(payload_bytes, &forward_route, &destination, &delays).unwrap();
 
     BASE64_STANDARD.encode(sphinx_packet.to_bytes())
 }
@@ -623,8 +630,9 @@ fn use_surb(
         message: Some(message.to_owned()),
         surb: None,
     };
-    let payload_b64 = BASE64_STANDARD.encode(serde_yaml::to_string(&payload).unwrap());
-    match surb.use_surb(payload_b64.as_bytes(), 1024) {
+    // let payload_b64 = BASE64_STANDARD.encode(serde_yaml::to_string(&payload).unwrap());
+    let payload_string = serde_yaml::to_string(&payload).unwrap();
+    match surb.use_surb(payload_string.as_bytes(), 1024) {
         Ok((packet, next_hop_address)) => {
             let packet_b64 = BASE64_STANDARD.encode(packet.to_bytes());
 
